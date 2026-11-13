@@ -1,0 +1,178 @@
+{
+  "name": "little-forge",
+  "displayName": "Little Forge",
+  "description": "A TrueForge-native coding agent with budgeted repository context and reviewed, undoable edits.",
+  "version": "0.1.0",
+  "publisher": "priyanshu-chaurasia",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/priyanshu-1006/Little-Forge.git"
+  },
+  "homepage": "https://github.com/priyanshu-1006/Little-Forge#readme",
+  "bugs": {
+    "url": "https://github.com/priyanshu-1006/Little-Forge/issues"
+  },
+  "keywords": [
+    "trueforge",
+    "ai-agent",
+    "code-review",
+    "mcp",
+    "vscode"
+  ],
+  "engines": {
+    "vscode": "^1.96.0",
+    "node": ">=22.14.0"
+  },
+  "categories": [
+    "Machine Learning",
+    "Other"
+  ],
+  "main": "./dist/extension.cjs",
+  "activationEvents": [
+    "onView:littleForge.agent"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": "limited",
+      "description": "Applying edits and running project commands require a trusted workspace."
+    },
+    "virtualWorkspaces": false
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "watch": "node scripts/build.mjs --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test tests/*.test.ts",
+    "check": "npm run typecheck && npm test && npm run build",
+    "package": "npm run build && vsce package --no-dependencies --no-rewrite-relative-links",
+    "harness": "node scripts/start-harness.mjs",
+    "spike": "tsx scripts/spike.ts",
+    "test:ui": "node scripts/ui-smoke.mjs",
+    "evaluate:retrieval": "tsx scripts/evaluate-retrieval.ts",
+    "accept:live": "tsx scripts/live-acceptance.ts",
+    "accept:prepare": "node scripts/prepare-live.mjs"
+  },
+  "contributes": {
+    "commands": [
+      {
+        "command": "littleForge.open",
+        "title": "Little Forge: Open Agent"
+      },
+      {
+        "command": "littleForge.inlineEdit",
+        "title": "Little Forge: Edit Selection"
+      },
+      {
+        "command": "littleForge.stop",
+        "title": "Little Forge: Stop Current Run"
+      },
+      {
+        "command": "littleForge.undo",
+        "title": "Little Forge: Undo Accepted Changes"
+      },
+      {
+        "command": "littleForge.setup",
+        "title": "Little Forge: Connect TrueForge"
+      },
+      {
+        "command": "littleForge.review",
+        "title": "Little Forge: Review Proposed Changes"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "littleForge.inlineEdit",
+        "key": "ctrl+alt+i",
+        "mac": "cmd+alt+i",
+        "when": "editorTextFocus && editorHasSelection"
+      },
+      {
+        "command": "littleForge.open",
+        "key": "ctrl+alt+f",
+        "mac": "cmd+alt+f"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "littleForge",
+          "title": "Little Forge",
+          "icon": "resources/forge.svg"
+        }
+      ]
+    },
+    "views": {
+      "littleForge": [
+        {
+          "id": "littleForge.agent",
+          "name": "Forge Agent",
+          "type": "webview"
+        }
+      ]
+    },
+    "menus": {
+      "editor/context": [
+        {
+          "command": "littleForge.inlineEdit",
+          "when": "editorHasSelection",
+          "group": "littleForge@1"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Little Forge",
+      "properties": {
+        "littleForge.baseUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:8790",
+          "scope": "application",
+          "description": "Local TrueForge server origin."
+        },
+        "littleForge.model": {
+          "type": "string",
+          "default": "",
+          "scope": "application",
+          "description": "Configured TrueForge provider/model identifier; no model credentials are stored here."
+        },
+        "littleForge.fallbackModel": {
+          "type": "string",
+          "default": "",
+          "scope": "application",
+          "description": "Optional second configured TrueForge model for safe pre-mutation fallback."
+        },
+        "littleForge.reasoningEffort": {
+          "type": "string",
+          "enum": ["", "low", "medium", "high"],
+          "default": "",
+          "scope": "application",
+          "description": "Optional reasoning level passed through TrueForge. Empty uses the provider default. Select only a level supported by both the primary and fallback models."
+        },
+        "littleForge.contextTokens": {
+          "type": "number",
+          "minimum": 8192,
+          "maximum": 1000000,
+          "default": 32768,
+          "scope": "application",
+          "description": "Verified model context capacity, including output reserve."
+        }
+      }
+    }
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.26.0",
+    "diff": "8.0.2",
+    "ignore": "7.0.5",
+    "zod": "4.1.12"
+  },
+  "devDependencies": {
+    "@truefoundry/trueforge": "0.180.1",
+    "@types/node": "22.18.0",
+    "@types/vscode": "1.96.0",
+    "@vscode/vsce": "3.6.2",
+    "esbuild": "0.25.12",
+    "playwright-core": "1.56.1",
+    "tsx": "4.20.6",
+    "typescript": "5.9.3"
+  }
+}

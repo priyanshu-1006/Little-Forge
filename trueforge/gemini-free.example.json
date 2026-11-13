@@ -1,0 +1,18 @@
+{
+  "manifest": {
+    "type": "google-gemini",
+    "base_url": "https://generativelanguage.googleapis.com/v1beta",
+    "auth": { "api_key": "REPLACE_ONLY_IN_LOCAL_TRUEFORGE_SETTINGS" },
+    "models": [
+      {
+        "model_id": "gemini-3.8-flash",
+        "name": "gemini-3-8-flash",
+        "properties": {
+          "context_length": 1048576,
+          "max_output_tokens": 65536,
+          "reasoning_efforts": ["low", "medium", "high"]
+        }
+      }
+    ]
+  }
+}

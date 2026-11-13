@@ -1,0 +1,8 @@
+{
+  "manifest": {
+    "type": "custom",
+    "name": "local",
+    "base_url": "http://127.0.0.1:11434/v1",
+    "models": [{ "name": "model", "model_id": "REPLACE_WITH_INSTALLED_TOOL_CAPABLE_MODEL", "properties": { "context_length": 32768, "max_output_tokens": 4096 } }]
+  }
+}

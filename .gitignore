@@ -1,0 +1,39 @@
+# Dependencies and build output
+node_modules/
+dist/
+*.vsix
+*.tsbuildinfo
+.eslintcache
+
+# Local TrueForge harness state, saved providers and credentials
+.trueforge/
+.env
+.env.*
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Local test receipts, editor profiles and generated output
+test-results/
+evaluation/workspaces/
+output/
+tmp/
+coverage/
+
+# Python caches from the Flask evaluation environment
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Editor and OS noise
+.vscode/settings.json
+*.log
+.DS_Store
+Thumbs.db
+desktop.ini

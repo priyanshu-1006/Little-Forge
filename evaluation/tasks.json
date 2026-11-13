@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "source": "Supplied TrueFoundry Forge-a-thon problem statement, pages 4-5; prompts transcribed without task-specific path hints for Task B.",
+  "repository": {
+    "url": "https://github.com/pallets/flask.git",
+    "tag": "3.1.3",
+    "commit": "22d924701a6ae2e4cd01e9a15bbaf3946094af65"
+  },
+  "tasks": [
+    {
+      "id": "A",
+      "mode": "inline",
+      "selection": { "path": "src/flask/helpers.py", "symbol": "get_debug_flag" },
+      "prompt": "Treat the values 'off' and 'n' as false as well, case-insensitively, and update the docstring to list every value that is treated as false.",
+      "verification": [
+        "Show the selected function, keybinding, instruction, streamed result and editor diff before applying.",
+        "Review and accept the intended hunks.",
+        "Set FLASK_DEBUG=off in the verifier process and show get_debug_flag() returns False using the editable pinned checkout."
+      ]
+    },
+    {
+      "id": "B",
+      "mode": "agent",
+      "prompt": "Add a new built-in CLI command flask config that prints the loaded application's configuration as JSON, masking the values of any key containing SECRET, PASSWORD, TOKEN or KEY as \"***\". It must appear in flask --help, be covered by a test, and be documented alongside the other built-in commands.",
+      "fileHintsAllowed": false,
+      "verification": [
+        "The agent discovers and proposes meaningful changes to at least three files without the user naming them.",
+        "Show selected context paths, reasons and budget, independent hunk review, and the actual TrueForge session turns and tool calls.",
+        "Run pytest tests/test_cli.py -q and show its successful exit status.",
+        "Run the new built-in command against a synthetic Flask app and show masked JSON and flask --help."
+      ]
+    },
+    {
+      "id": "C",
+      "mode": "inline",
+      "selection": { "path": "src/flask/helpers.py", "symbol": "get_debug_flag" },
+      "setup": "Configure the model inside TrueForge with an unreachable model endpoint or invalid model key, then repeat Task A. Keep the TrueForge server running.",
+      "prompt": "Treat the values 'off' and 'n' as false as well, case-insensitively, and update the docstring to list every value that is treated as false.",
+      "verification": [
+        "Use a clean Task C checkout and record the baseline commit, Git status and source hashes.",
+        "Show the editor stays responsive, a clear failure or automatic configured-model fallback, and unchanged source hashes and Git status.",
+        "Leave any fallback-generated proposal unapplied."
+      ]
+    }
+  ],
+  "evidencePolicy": "This manifest specifies future live acceptance. It contains no claims that the tasks, model inference or video recording have passed. Evaluation metadata must never be injected as Task B context or converted to a Flask-specific implementation shortcut."
+}
