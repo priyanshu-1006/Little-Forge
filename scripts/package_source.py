@@ -3,7 +3,7 @@ from pathlib import Path
 import datetime, hashlib, json, os, re, zipfile
 
 root=Path(__file__).resolve().parents[1]
-root_files={'package.json','package-lock.json','tsconfig.json','.gitignore','.vscodeignore','.editorconfig','README.md','LICENSE','REUSE.md','THIRD_PARTY_NOTICES.md','CONTRIBUTING.md','Start Little Forge.cmd'}
+root_files={'package.json','package-lock.json','tsconfig.json','.gitignore','.gitattributes','.vscodeignore','.editorconfig','README.md','LICENSE','REUSE.md','THIRD_PARTY_NOTICES.md','CONTRIBUTING.md','Start Little Forge.cmd'}
 source_dirs={'src','tests','scripts','resources','docs','trueforge','evaluation','submission','.vscode','.github'}
 excluded={'node_modules','dist','output','tmp','test-results','.trueforge','.git','workspaces','__pycache__','.venv'}
 private_name=re.compile(r'^(?:\.env.*|credentials?(?:[._-].*)?|secrets?(?:[._-].*)?)$|\.(?:sqlite|db)(?:-|$)|\.(?:pem|key|p12|pfx)$',re.I)
