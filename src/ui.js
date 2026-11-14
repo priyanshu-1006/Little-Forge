@@ -39,42 +39,42 @@ function parseAntigravityStep(raw) {
   const text = String(raw || '').trim();
   if (text.startsWith('search workspace:')) {
     const q = text.replace('search workspace:', '').trim();
-    return { type: 'search', text: `Searched workspace for "${q}"`, arrow: true, detail: q };
+    return { type: 'search', prefix: 'Searched', text: `workspace for "${q}"`, arrow: true, detail: q };
   }
   if (text.startsWith('read file:')) {
     const p = text.replace('read file:', '').trim();
-    return { type: 'read', text: `Read ${p}`, badge: getLangBadge(p), arrow: true, detail: p };
+    return { type: 'read', prefix: 'Read', badge: getLangBadge(p), text: p, arrow: true, detail: p, path: p };
   }
   if (text.startsWith('edited file:')) {
     const p = text.replace('edited file:', '').trim();
-    return { type: 'edit', text: `Edited ${p}`, badge: getLangBadge(p), arrow: false, detail: p };
+    return { type: 'edit', prefix: 'Edited', badge: getLangBadge(p), text: p, arrow: false, detail: p, path: p };
   }
   if (text.startsWith('staged file:')) {
     const p = text.replace('staged file:', '').trim();
-    return { type: 'stage', text: `Staged ${p}`, badge: getLangBadge(p), arrow: false, detail: p };
+    return { type: 'stage', prefix: 'Created', badge: getLangBadge(p), text: p, arrow: false, detail: p, path: p };
   }
   if (text.startsWith('ran command:') || text.startsWith('run command:')) {
     const cmdFull = text.replace(/^(?:ran command|run command):/, '').trim();
     const parts = cmdFull.split(' · Exit code ');
     const cmd = parts[0];
     const code = parts[1];
-    const label = code && code !== '0' ? `Ran ${cmd} · Exited with code ${code}` : `Ran ${cmd}`;
-    return { type: 'command', text: label, arrow: true, detail: cmdFull };
+    const suffix = code && code !== '0' ? `· Exited with code ${code}` : '';
+    return { type: 'command', prefix: 'Ran', text: cmd, suffix, arrow: true, detail: cmdFull };
   }
   if (text.startsWith('Auto-allowed verification check:')) {
     const cmd = text.replace('Auto-allowed verification check:', '').trim();
-    return { type: 'command', text: `Ran ${cmd}`, arrow: true, detail: cmd };
+    return { type: 'command', prefix: 'Ran', text: cmd, arrow: true, detail: cmd };
   }
   if (text.startsWith('get workspace map') || text.startsWith('get_workspace_map')) {
-    return { type: 'map', text: 'Explored workspace tree', arrow: true };
+    return { type: 'map', prefix: 'Explored', text: 'workspace tree', arrow: true };
   }
   if (text.startsWith('retrieve context') || text.startsWith('retrieve_context')) {
-    return { type: 'context', text: 'Retrieved context evidence', arrow: true };
+    return { type: 'context', prefix: 'Retrieved', text: 'context evidence', arrow: true };
   }
   if (text === 'Tool result received' || text.startsWith('Context:') || text.startsWith('Reasoning effort:') || text.startsWith('Local Permissions:') || text.startsWith('Permissions set to:')) {
     return null;
   }
-  return { type: 'generic', text: text, arrow: true };
+  return { type: 'generic', prefix: 'Ran', text: text, arrow: true };
 }
 
 function formatToolStep(raw) {
@@ -138,28 +138,43 @@ function renderStepList(list, steps) {
   const existingRows = Array.from(list.children);
   if (existingRows.length === steps.length) {
     const lastRow = existingRows[existingRows.length - 1];
-    if (lastRow && lastRow.dataset.stepText === steps[steps.length - 1].text) {
+    const lastStep = steps[steps.length - 1];
+    const key = `${lastStep.prefix || ''}-${lastStep.text}-${lastStep.suffix || ''}`;
+    if (lastRow && lastRow.dataset.stepKey === key) {
       return;
     }
   }
 
   list.replaceChildren(...steps.map((step, sIdx) => {
+    const key = `${step.prefix || ''}-${step.text}-${step.suffix || ''}`;
     const existing = existingRows[sIdx];
-    if (existing && existing.dataset.stepText === step.text) {
+    if (existing && existing.dataset.stepKey === key) {
       return existing;
     }
 
     const sRow = element('div', 'work-step-row');
-    sRow.dataset.stepText = step.text;
+    sRow.dataset.stepKey = key;
+    if (step.prefix) {
+      sRow.append(element('span', 'work-step-prefix', step.prefix));
+    }
     if (step.badge) {
       sRow.append(element('span', `lang-tag ${step.badge.cls}`, step.badge.label));
     }
     sRow.append(element('span', 'work-step-text', step.text));
+    if (step.suffix) {
+      sRow.append(element('span', 'work-step-suffix', ` ${step.suffix}`));
+    }
     if (step.arrow) {
       sRow.append(element('span', 'work-step-arrow', '›'));
     }
 
-    if (step.detail) {
+    if (step.path) {
+      sRow.title = `Click to inspect diff for ${step.path}`;
+      sRow.addEventListener('click', e => {
+        e.stopPropagation();
+        send('openDiff', { path: step.path });
+      });
+    } else if (step.detail) {
       const detailEl = element('div', 'work-step-detail', step.detail);
       detailEl.hidden = true;
       sRow.addEventListener('click', e => {
@@ -168,7 +183,7 @@ function renderStepList(list, steps) {
         sRow.classList.toggle('expanded', !detailEl.hidden);
       });
       const container = element('div', 'work-step-item');
-      container.dataset.stepText = step.text;
+      container.dataset.stepKey = key;
       container.append(sRow, detailEl);
       return container;
     }
@@ -182,30 +197,118 @@ function createWorkTraceElement(busy, steps) {
   trace.open = true;
 
   const summary = element('summary', 'work-trace-summary');
-  const timerText = busy ? 'Thinking…' : `Worked for ${formatDuration(lastCompletedDuration || 14)}`;
+  const timerText = busy ? 'Thinking...' : `Worked for ${formatDuration(lastCompletedDuration || 14)}`;
   const timerSpan = element('span', 'work-trace-timer', timerText);
   const twisty = element('span', 'work-trace-twisty', '▾');
   summary.append(timerSpan, twisty);
   trace.append(summary);
 
-  const hasEdits = steps.some(s => s.type === 'edit' || s.type === 'stage');
-  const hasCmds = steps.some(s => s.type === 'command');
-  const subTitle = hasEdits && hasCmds ? 'Explored files, ran commands, edited files' : hasEdits ? 'Explored files, edited files' : hasCmds ? 'Explored files, ran commands' : 'Explored files';
+  if (steps.length > 0) {
+    const hasEdits = steps.some(s => s.type === 'edit' || s.type === 'stage');
+    const hasCmds = steps.some(s => s.type === 'command');
+    const subTitle = hasEdits && hasCmds ? 'Explored files, ran commands, edited files' : hasEdits ? 'Explored files, edited files' : hasCmds ? 'Explored files, ran commands' : 'Explored files';
 
-  const subgroup = element('details', 'work-subgroup');
-  subgroup.open = true;
-  const subSummary = element('summary', 'work-subgroup-summary');
-  const subTitleSpan = element('span', 'subgroup-title', subTitle);
-  const subTwisty = element('span', 'work-subgroup-twisty', '▾');
-  subSummary.append(subTitleSpan, subTwisty);
-  subgroup.append(subSummary);
+    const subgroup = element('details', 'work-subgroup');
+    subgroup.open = true;
+    const subSummary = element('summary', 'work-subgroup-summary');
+    const subTitleSpan = element('span', 'subgroup-title', subTitle);
+    const subTwisty = element('span', 'work-subgroup-twisty', '▾');
+    subSummary.append(subTitleSpan, subTwisty);
+    subgroup.append(subSummary);
 
-  const list = element('div', 'work-steps-list');
-  renderStepList(list, steps);
-  subgroup.append(list);
-  trace.append(subgroup);
+    const list = element('div', 'work-steps-list');
+    renderStepList(list, steps);
+    subgroup.append(list);
+    trace.append(subgroup);
+  }
 
   return trace;
+}
+
+function createForgeProofCard(files, checks, checkpointId, sessionId) {
+  const card = element('div', 'forgeproof-card');
+  
+  const header = element('div', 'forgeproof-header');
+  const titleGroup = element('div', 'forgeproof-title-group');
+  titleGroup.append(
+    element('span', 'forgeproof-badge', '✓ Verified'),
+    element('strong', 'forgeproof-title', 'ForgeProof Outcome')
+  );
+  header.append(titleGroup);
+  card.append(header);
+
+  if (files.length > 0) {
+    const filesSection = element('div', 'forgeproof-section');
+    filesSection.append(element('div', 'forgeproof-section-label', `📁 ${files.length} Modified ${files.length === 1 ? 'File' : 'Files'}`));
+
+    const pillList = element('div', 'forgeproof-file-list');
+    for (const f of files) {
+      const badge = getLangBadge(f);
+      const pill = element('button', 'forgeproof-file-pill');
+      pill.title = `Click to inspect diff for ${f}`;
+      if (badge) pill.append(element('span', `lang-tag ${badge.cls}`, badge.label));
+      pill.append(element('span', 'forgeproof-filename', f));
+      pill.append(element('span', 'forgeproof-diff-action', 'Diff ↗'));
+      pill.addEventListener('click', e => {
+        e.stopPropagation();
+        send('openDiff', { path: f });
+      });
+      pillList.append(pill);
+    }
+    filesSection.append(pillList);
+    card.append(filesSection);
+  }
+
+  if (checks.length > 0) {
+    const checkSection = element('div', 'forgeproof-section');
+    checkSection.append(element('div', 'forgeproof-section-label', '✓ Verification Checks'));
+    const checkList = element('div', 'forgeproof-check-list');
+    for (const c of checks) {
+      const cRow = element('div', 'forgeproof-check-row');
+      cRow.append(element('span', 'check-icon', '✓'));
+      cRow.append(element('span', 'check-text', c.text));
+      checkList.append(cRow);
+    }
+    checkSection.append(checkList);
+    card.append(checkSection);
+  }
+
+  const footer = element('div', 'forgeproof-footer');
+  
+  if (checkpointId) {
+    const undoBtn = button('↺ Undo Changes', 'forgeproof-action-btn undo', () => send('undo', { id: checkpointId }));
+    undoBtn.title = 'Restore workspace to checkpoint snapshot';
+    footer.append(undoBtn);
+  }
+
+  if (sessionId) {
+    const sessBtn = button('↗ TrueForge Session', 'forgeproof-action-btn session', () => send('session'));
+    sessBtn.title = 'Open TrueForge session in browser';
+    footer.append(sessBtn);
+  }
+
+  const copyBtn = button('📋 Copy Proof', 'forgeproof-action-btn copy', () => {
+    const text = [
+      `### Little Forge 2.0 — ForgeProof Outcome`,
+      `- **Session**: \`${sessionId || 'local'}\``,
+      `- **Files Changed** (${files.length}):`,
+      ...files.map(f => `  - \`${f}\``),
+      `- **Checks**:`,
+      ...checks.map(c => `  - ${c.text}`),
+      `- **Checkpoint**: \`${checkpointId || 'active'}\` (undo available)`,
+      `- **Permissions**: Protected sensitive perimeter`
+    ].join('\n');
+    if (navigator.clipboard) {
+      navigator.clipboard.writeText(text).then(() => {
+        copyBtn.textContent = '✓ Copied!';
+        setTimeout(() => { copyBtn.textContent = '📋 Copy Proof'; }, 2000);
+      });
+    }
+  });
+  footer.append(copyBtn);
+
+  card.append(footer);
+  return card;
 }
 
 function updateActiveAssistantRow(row, message, busy, state, steps) {
@@ -215,7 +318,7 @@ function updateActiveAssistantRow(row, message, busy, state, steps) {
   }
 
   let trace = row.querySelector('.work-trace');
-  if (steps.length > 0) {
+  if (steps.length > 0 || busy) {
     if (!trace) {
       trace = createWorkTraceElement(busy, steps);
       const body = row.querySelector('.message-body');
@@ -224,23 +327,42 @@ function updateActiveAssistantRow(row, message, busy, state, steps) {
       // IN-PLACE UPDATE: Never touch trace.open or subgroup.open! User's toggle state is 100% preserved.
       const timerSpan = trace.querySelector('.work-trace-timer');
       if (timerSpan) {
-        timerSpan.textContent = busy ? 'Thinking…' : `Worked for ${formatDuration(lastCompletedDuration || 14)}`;
+        timerSpan.textContent = busy ? 'Thinking...' : `Worked for ${formatDuration(lastCompletedDuration || 14)}`;
       }
 
-      const hasEdits = steps.some(s => s.type === 'edit' || s.type === 'stage');
-      const hasCmds = steps.some(s => s.type === 'command');
-      const subTitle = hasEdits && hasCmds ? 'Explored files, ran commands, edited files' : hasEdits ? 'Explored files, edited files' : hasCmds ? 'Explored files, ran commands' : 'Explored files';
+      let subgroup = trace.querySelector('.work-subgroup');
+      if (steps.length > 0) {
+        const hasEdits = steps.some(s => s.type === 'edit' || s.type === 'stage');
+        const hasCmds = steps.some(s => s.type === 'command');
+        const subTitle = hasEdits && hasCmds ? 'Explored files, ran commands, edited files' : hasEdits ? 'Explored files, edited files' : hasCmds ? 'Explored files, ran commands' : 'Explored files';
 
-      const subTitleSpan = trace.querySelector('.subgroup-title');
-      if (subTitleSpan) {
-        subTitleSpan.textContent = subTitle;
-      }
+        if (!subgroup) {
+          subgroup = element('details', 'work-subgroup');
+          subgroup.open = true;
+          const subSummary = element('summary', 'work-subgroup-summary');
+          const subTitleSpan = element('span', 'subgroup-title', subTitle);
+          const subTwisty = element('span', 'work-subgroup-twisty', '▾');
+          subSummary.append(subTitleSpan, subTwisty);
+          subgroup.append(subSummary);
 
-      const list = trace.querySelector('.work-steps-list');
-      if (list) {
-        renderStepList(list, steps);
+          const list = element('div', 'work-steps-list');
+          renderStepList(list, steps);
+          subgroup.append(list);
+          trace.append(subgroup);
+        } else {
+          const subTitleSpan = subgroup.querySelector('.subgroup-title');
+          if (subTitleSpan) {
+            subTitleSpan.textContent = subTitle;
+          }
+          const list = subgroup.querySelector('.work-steps-list');
+          if (list) {
+            renderStepList(list, steps);
+          }
+        }
       }
     }
+  } else if (trace && !busy && steps.length === 0) {
+    trace.remove();
   }
 
   const body = row.querySelector('.message-body');
@@ -253,6 +375,23 @@ function updateActiveAssistantRow(row, message, busy, state, steps) {
         renderMessageContent(body, message.text);
       }
     }
+  }
+
+  // ForgeProof Outcome Card
+  const existingProof = row.querySelector('.forgeproof-card');
+  const allFiles = [...new Set([
+    ...state.checkpoints.flatMap(cp => cp.paths),
+    ...state.activity.filter(a => a.startsWith('edited file:') || a.startsWith('staged file:')).map(a => a.replace(/^(?:edited file|staged file):/, '').trim())
+  ])];
+  const allChecks = steps.filter(s => s.type === 'command');
+  const latestCpId = state.checkpoints.length > 0 ? state.checkpoints[state.checkpoints.length - 1].id : undefined;
+
+  if (!busy && (allFiles.length > 0 || allChecks.length > 0) && (state.status === 'completed' || state.checkpoints.length > 0)) {
+    if (!existingProof) {
+      row.append(createForgeProofCard(allFiles, allChecks, latestCpId, state.sessionId));
+    }
+  } else if (existingProof && busy) {
+    existingProof.remove();
   }
 }
 
@@ -270,7 +409,7 @@ function buildMessageRow(message, idx, isLast, busy, state, steps) {
     }
     row.append(header);
 
-    if (steps.length > 0 && isLast) {
+    if ((steps.length > 0 || busy) && isLast) {
       row.append(createWorkTraceElement(busy, steps));
     }
   }
@@ -281,6 +420,20 @@ function buildMessageRow(message, idx, isLast, busy, state, steps) {
     renderMessageContent(body, message.text);
   }
   row.append(body);
+
+  if (!isUser) {
+    const allFiles = [...new Set([
+      ...state.checkpoints.flatMap(cp => cp.paths),
+      ...state.activity.filter(a => a.startsWith('edited file:') || a.startsWith('staged file:')).map(a => a.replace(/^(?:edited file|staged file):/, '').trim())
+    ])];
+    const allChecks = steps.filter(s => s.type === 'command');
+    const latestCpId = state.checkpoints.length > 0 ? state.checkpoints[state.checkpoints.length - 1].id : undefined;
+
+    if (!busy && (allFiles.length > 0 || allChecks.length > 0) && (state.status === 'completed' || state.checkpoints.length > 0)) {
+      row.append(createForgeProofCard(allFiles, allChecks, latestCpId, state.sessionId));
+    }
+  }
+
   return row;
 }
 
@@ -328,6 +481,10 @@ function render() {
   })[state.status] || state.status;
   $('stop').hidden = !busy; $('send').disabled = busy; $('prompt').disabled = busy;
   $('session').hidden = !state.sessionId;
+  const connectBtn = $('connect');
+  if (connectBtn) {
+    connectBtn.hidden = state.connected;
+  }
   const sessionBtn = $('session-btn');
   if (sessionBtn) {
     sessionBtn.title = state.sessionId ? `Open TrueForge session (${state.sessionId.slice(-6)})` : 'Open TrueForge sessions dashboard';

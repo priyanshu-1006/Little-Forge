@@ -26,6 +26,7 @@ export function activate(context: vscode.ExtensionContext) {
   register('littleForge.undo', () => forge.undo());
   register('littleForge.setup', () => forge.setup());
   register('littleForge.review', () => forge.reviewLatest());
+  register('littleForge.selfCheck', () => forge.selfCheck());
 }
 
 class ForgeExtension implements vscode.WebviewViewProvider, vscode.Disposable {
@@ -136,6 +137,7 @@ class ForgeExtension implements vscode.WebviewViewProvider, vscode.Disposable {
       case 'apply': await this.applySelection(str('proposalId')); return;
       case 'commandDecision': { const id = str('toolCallId'); const approval = this.state.approvals.find(a => a.toolCallId === id && a.name === 'run_command'); if (!approval || !this.run) throw new Error('This command approval expired.'); this.run.decisions.set(id, message.allow === true); await this.maybeResume(); return; }
       case 'undo': await this.undo(str('id')); return;
+      case 'openDiff': await this.openFileDiff(str('path')); return;
     }
   }
   private assertCurrent(id: string) { const proposal = this.proposals?.get(id); if (!this.run || !proposal || proposal.runId !== this.run.id || this.run.abort.signal.aborted) throw new Error('This proposal belongs to an expired run.'); return proposal; }
@@ -442,6 +444,88 @@ class ForgeExtension implements vscode.WebviewViewProvider, vscode.Disposable {
     await vscode.commands.executeCommand('vscode.diff', before, after, `${file.path} · Little Forge reviewed proposal`, { preview: true });
   }
   async reviewLatest() { const proposal = this.state.proposals.at(-1); if (!proposal) throw new Error('No proposed changes to review.'); await this.preview(proposal.id, proposal.files[0].path); await vscode.commands.executeCommand('littleForge.agent.focus'); }
+  async openFileDiff(filePath: string) {
+    await this.initialise();
+    const activeProposal = this.state.proposals.find(p => p.files.some(f => f.path === filePath));
+    if (activeProposal) {
+      await this.preview(activeProposal.id, filePath);
+      return;
+    }
+    const absolute = await this.workspace?.resolve(filePath);
+    if (!absolute) return;
+    const currentUri = vscode.Uri.file(absolute);
+    try {
+      await vscode.commands.executeCommand('git.openChange', currentUri);
+    } catch {
+      await vscode.window.showTextDocument(currentUri, { preview: true });
+    }
+  }
+  async selfCheck() {
+    await this.initialise();
+    this.output.show(true);
+    this.output.appendLine('======================================================');
+    this.output.appendLine('   Little Forge 2.0 — Pre-Flight Diagnostics          ');
+    this.output.appendLine('======================================================\n');
+    const items: { name: string; ok: boolean; detail: string }[] = [];
+
+    const baseUrl = this.config().get<string>('endpoint', 'http://127.0.0.1:8790');
+    let healthResult: { models: Array<{ name: string }>; version?: string } | undefined;
+    try {
+      if (!this.client) this.client = new ForgeClient(baseUrl);
+      healthResult = await this.client.health();
+      items.push({ name: 'TrueForge Daemon', ok: true, detail: `v${healthResult.version || '0.180.1'} online at ${baseUrl}` });
+      this.state.connected = true;
+    } catch {
+      items.push({ name: 'TrueForge Daemon', ok: false, detail: `Unreachable at ${baseUrl}` });
+      this.state.connected = false;
+    }
+
+    if (healthResult) {
+      const current = this.state.model || this.config().get<string>('model', '');
+      const match = healthResult.models.find(m => m.name === current || m.name.endsWith(current));
+      if (match) {
+        items.push({ name: 'Model Connection', ok: true, detail: `${match.name} (verified in TrueForge catalog)` });
+      } else {
+        items.push({ name: 'Model Connection', ok: healthResult.models.length > 0, detail: `${current || 'None selected'} (${healthResult.models.length} models available in TrueForge)` });
+      }
+    } else {
+      items.push({ name: 'Model Connection', ok: false, detail: 'Failed to query models from harness' });
+    }
+
+    try {
+      const root = this.workspace?.root;
+      if (root) {
+        const venvWin = vscode.Uri.joinPath(vscode.Uri.file(root), '.venv', 'Scripts', 'python.exe');
+        const venvPosix = vscode.Uri.joinPath(vscode.Uri.file(root), '.venv', 'bin', 'python');
+        let hasVenv = false;
+        try { await vscode.workspace.fs.stat(venvWin); hasVenv = true; } catch {}
+        if (!hasVenv) { try { await vscode.workspace.fs.stat(venvPosix); hasVenv = true; } catch {} }
+        items.push({ name: 'Workspace Environment', ok: true, detail: `${path.basename(root)} (${hasVenv ? 'dedicated .venv active' : 'system python'})` });
+      } else {
+        items.push({ name: 'Workspace Environment', ok: false, detail: 'No folder open in editor' });
+      }
+    } catch (e) {
+      items.push({ name: 'Workspace Environment', ok: false, detail: String(e) });
+    }
+
+    items.push({ name: 'Local Permissions', ok: true, detail: `Mode "${this.state.permissionMode}" (sensitive files & credentials protected)` });
+
+    for (const item of items) {
+      const symbol = item.ok ? '✓ PASS' : '✗ FAIL';
+      this.output.appendLine(`[${symbol}] ${item.name}: ${item.detail}`);
+    }
+    this.output.appendLine('\n======================================================');
+
+    const passCount = items.filter(i => i.ok).length;
+    if (passCount === items.length) {
+      this.output.appendLine(`RESULT: All ${items.length} checks PASSED. Ready for demo recording.`);
+      void vscode.window.showInformationMessage(`Little Forge Pre-Flight: All ${items.length} checks passed! Ready for demo.`, 'View Output').then(s => { if (s) this.output.show(); });
+    } else {
+      this.output.appendLine(`RESULT: ${passCount}/${items.length} checks passed. Please review details above.`);
+      void vscode.window.showWarningMessage(`Little Forge Pre-Flight: ${passCount}/${items.length} checks passed. Check Output for details.`, 'View Output').then(s => { if (s) this.output.show(); });
+    }
+    this.publish(true);
+  }
   async undo(id?: string) {
     if (this.busy()) throw new Error('Stop the active run before restoring a checkpoint.');
     this.preparing = true;

@@ -78,6 +78,10 @@
       {
         "command": "littleForge.review",
         "title": "Little Forge: Review Proposed Changes"
+      },
+      {
+        "command": "littleForge.selfCheck",
+        "title": "Little Forge: Run Environment Pre-Flight Check"
       }
     ],
     "keybindings": [
