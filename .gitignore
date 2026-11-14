@@ -37,3 +37,8 @@ venv/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Competition and planning briefs
+TrueFoundry_Forge-a-thon.pdf
+Little_Forge_2_0_Master_Blueprint.md
+Little_Forge_2_0_Implementation_Pack/

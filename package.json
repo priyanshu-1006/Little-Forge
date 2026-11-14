@@ -155,6 +155,13 @@
           "default": 32768,
           "scope": "application",
           "description": "Verified model context capacity, including output reserve."
+        },
+        "littleForge.permissionMode": {
+          "type": "string",
+          "enum": ["review", "default", "auto", "turbo"],
+          "default": "auto",
+          "scope": "application",
+          "description": "Local permission mode: review (ask before any change/command), default (ask sensitive), auto (auto-apply safe edits and checks), turbo (fully autonomous in workspace)."
         }
       }
     }

@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import * as path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { Workspace } from './core/workspace.js';
+import { isSensitivePath, Workspace } from './core/workspace.js';
 import { ContextEngine, parseMentions } from './core/context.js';
 import { ProposalManager } from './core/proposals.js';
 import { hash, type ContextResult, type ForgeEvent, type Proposal, type SelectionScope } from './core/types.js';
@@ -11,8 +11,9 @@ import { EditorTools } from './tools.js';
 import { MAX_RETRY_DELAY_MS, quotaContinuationInput, recoveryAction, waitForRetry } from './core/resilience.js';
 
 type Status = 'idle' | 'connecting' | 'running' | 'awaiting-review' | 'cancelling' | 'cancelled' | 'completed' | 'failed';
+export type PermissionMode = 'review' | 'default' | 'auto' | 'turbo';
 interface Message { role: 'user' | 'assistant'; text: string }
-interface UiState { status: Status; connected: boolean; model: string; sessionId?: string; messages: Message[]; activity: string[]; context?: ContextResult; proposals: Proposal[]; approvals: ApprovalRequest[]; checkpoints: Array<{id:string;paths:string[];state:string}>; error?: string }
+interface UiState { status: Status; connected: boolean; model: string; permissionMode: PermissionMode; sessionId?: string; messages: Message[]; activity: string[]; context?: ContextResult; proposals: Proposal[]; approvals: ApprovalRequest[]; checkpoints: Array<{id:string;paths:string[];state:string}>; error?: string }
 interface Running { id: string; abort: AbortController; assistant: Message; model: string; reasoningEffort: string; mode: 'inline' | 'agent'; decisions: Map<string, boolean>; scope?: SelectionScope; retries: number; fallbackUsed: boolean; inFlight: boolean; resuming: boolean }
 
 export function activate(context: vscode.ExtensionContext) {
@@ -32,7 +33,7 @@ class ForgeExtension implements vscode.WebviewViewProvider, vscode.Disposable {
   private readonly output = vscode.window.createOutputChannel('Little Forge');
   private readonly virtual = new Map<string, string>();
   private readonly disposables: vscode.Disposable[] = [];
-  private state: UiState = { status: 'idle', connected: false, model: '', messages: [], activity: [], proposals: [], approvals: [], checkpoints: [] };
+  private state: UiState = { status: 'idle', connected: false, model: '', permissionMode: 'auto', messages: [], activity: [], proposals: [], approvals: [], checkpoints: [] };
   private workspace?: Workspace;
   private context?: ContextEngine;
   private proposals?: ProposalManager;
@@ -50,6 +51,8 @@ class ForgeExtension implements vscode.WebviewViewProvider, vscode.Disposable {
 
   constructor(private readonly extension: vscode.ExtensionContext) {
     this.state.model = this.config().get<string>('model', '');
+    this.state.permissionMode = extension.workspaceState.get<PermissionMode>('permissionMode') || this.config().get<PermissionMode>('permissionMode', 'auto');
+    this.state.sessionId = extension.workspaceState.get<string>('sessionId');
     const history = extension.workspaceState.get<Message[]>('transcript', []);
     if (Array.isArray(history)) this.state.messages = history.filter(m => ['user', 'assistant'].includes(m.role) && typeof m.text === 'string').slice(-12).map(m => ({ role: m.role, text: m.text.slice(0, 16000) }));
     this.disposables.push(this.virtualChanges, vscode.workspace.registerTextDocumentContentProvider('little-forge', { onDidChange: this.virtualChanges.event, provideTextDocumentContent: uri => this.virtual.get(uri.toString()) ?? 'This review has expired.' }));
@@ -79,9 +82,9 @@ class ForgeExtension implements vscode.WebviewViewProvider, vscode.Disposable {
     const uri = (name: string) => view.webview.asWebviewUri(vscode.Uri.joinPath(this.extension.extensionUri, 'dist', name));
     const nonce = randomUUID().replaceAll('-', '');
     view.webview.html = `<!doctype html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${view.webview.cspSource}; script-src 'nonce-${nonce}';"><link rel="stylesheet" href="${uri('ui.css')}"></head><body>
-      <header><div class="brand"><span class="logo">ϟ</span>LITTLE FORGE<span class="status"><i id="dot" class="dot"></i><span id="connection">Local harness</span></span></div><div class="toolbar"><button id="model" class="pill">Choose model</button><button id="connect" class="pill" title="Connect and configure">Connect ↗</button><span class="spacer"></span><button id="new-chat" class="pill" title="New chat">＋</button></div></header>
-      <main><section id="hero" class="hero"><div class="eyebrow">BUILT ON TRUEFORGE</div><h1>Your code.<br>Your call.</h1><p>Find the right context. Make the change.<br>Review every hunk before it lands.</p><div class="workflow"><b>Discover</b><span>→</span><b>Propose</b><span>→</span><b>Review</b><span>→</span><b>Verify</b></div><div class="suggestions"><button class="suggestion" data-prompt="Explain how this repository is structured. Find the main entry points and tests, and cite source paths.">Map this repository <small>Trace the code before changing it.</small></button><button class="suggestion" data-prompt="Find a small missing edge-case test, explain why it matters, and propose a focused improvement with the relevant implementation and documentation changes if needed.">Make a focused improvement <small>Let the agent discover the files.</small></button></div></section>
-      <div id="run-status" class="run-status" hidden><i class="activity-dot"></i><span id="status-text"></span><span class="spacer"></span><button id="session" class="mention-button" hidden>Session ↗</button></div><div id="error" class="error" role="alert" hidden><strong>Needs attention</strong><span id="error-text"></span></div><div id="activity" class="activity-log"></div><div id="transcript"></div><section id="contexts" hidden><div class="section-title">Context evidence</div><div class="budget"><span id="budget-label"></span><span id="budget-index"></span></div><div class="meter"><i id="meter-bar"></i></div><div id="source-list"></div></section><div id="review-list"></div><div id="command-list"></div><section id="checkpoints" hidden><div class="section-title">Accepted changes</div><div id="checkpoint-list"></div></section></main>
+      <header><div class="brand"><span class="logo">ϟ</span><span>LITTLE FORGE</span><span class="version-badge">2.0</span><span class="status"><i id="dot" class="dot"></i><span id="connection">Local harness</span></span></div><div class="toolbar"><button id="model" class="pill">Choose model</button><button id="permissions-btn" class="pill" title="Local Permissions"><span id="perm-icon">🛡️</span> <span id="perm-label">Auto</span> ▾</button><button id="session-btn" class="pill" title="Open TrueForge session">Session ↗</button><button id="connect" class="pill" title="Connect and configure">Connect ↗</button><span class="spacer"></span><button id="new-chat" class="pill" title="New chat">＋</button></div><div id="permissions-menu" class="permissions-dropdown" hidden><div class="perm-title">Local Permissions</div><button type="button" class="perm-option" data-mode="review"><span class="perm-option-icon">👁️</span><div class="perm-option-info"><div class="perm-option-name">Request Review</div><div class="perm-option-desc">Every command and file change requires approval.</div></div><span class="perm-check">✓</span></button><button type="button" class="perm-option" data-mode="default"><span class="perm-option-icon">🔒</span><div class="perm-option-info"><div class="perm-option-name">Default</div><div class="perm-option-desc">Ask before sensitive operations and commands.</div></div><span class="perm-check">✓</span></button><button type="button" class="perm-option" data-mode="auto"><span class="perm-option-icon">🛡️</span><div class="perm-option-info"><div class="perm-option-name">Auto <span class="badge-rec">Default</span></div><div class="perm-option-desc">Automatically decide if commands run; auto-apply safe workspace changes.</div></div><span class="perm-check">✓</span></button><button type="button" class="perm-option" data-mode="turbo"><span class="perm-option-icon">⚡</span><div class="perm-option-info"><div class="perm-option-name">Turbo</div><div class="perm-option-desc">Run all safe checks and edits without restrictions; protect credentials.</div></div><span class="perm-check">✓</span></button></div></header>
+      <main><section id="hero" class="hero"><div class="eyebrow">BUILT ON TRUEFORGE</div><h1>Your code.<br>Your call.</h1><p>Autonomous context discovery. Exact multi-file diffs.<br>Every hunk stays yours to review before it lands.</p><div class="workflow"><b>Discover</b><span>→</span><b>Propose</b><span>→</span><b>Review</b><span>→</span><b>Verify</b></div><div class="suggestions"><button class="suggestion" data-prompt="Explain how this repository is structured. Find the main entry points and tests, and cite source paths."><div><strong>Map this repository</strong><small>Trace the code before changing it.</small></div></button><button class="suggestion" data-prompt="Find a small missing edge-case test, explain why it matters, and propose a focused improvement with the relevant implementation and documentation changes if needed."><div><strong>Make a focused improvement</strong><small>Let the agent discover the files.</small></div></button></div></section>
+      <div id="run-status" class="run-status" hidden><div class="spinner"></div><i class="activity-dot" style="display:none"></i><span id="status-text"></span><span class="spacer"></span><button id="session" class="mention-button" hidden>Session ↗</button></div><div id="error" class="error" role="alert" hidden><strong>Needs attention</strong><span id="error-text"></span></div><div id="activity" class="activity-log"></div><div id="transcript"></div><details id="contexts" class="context-drawer" hidden><summary class="context-summary"><span class="context-icon">📑</span><span>Context references (<span id="budget-index"></span>)</span><span id="budget-label" class="context-token-badge"></span><span class="context-arrow">▾</span></summary><div class="context-body"><div class="meter"><i id="meter-bar"></i></div><div id="source-list"></div></div></details><div id="review-list"></div><div id="command-list"></div><section id="checkpoints" hidden><div class="section-title">Accepted changes</div><div id="checkpoint-list"></div></section></main>
       <footer class="composer"><form id="form"><div class="compose-box"><textarea id="prompt" aria-label="Coding request" placeholder="Describe a change, or mention @file / @symbol…"></textarea><div class="compose-actions"><button type="button" id="file-mention" class="mention-button">@file</button><button type="button" id="symbol-mention" class="mention-button">@symbol</button><span class="spacer"></span><button id="stop" type="button" class="stop" hidden>■ Stop</button><button id="send" type="submit" class="primary send">Build ↗</button></div></div></form><div class="footnote"><span>Every edit stays yours to approve.</span><span class="badge">Ctrl ↵</span></div></footer><script nonce="${nonce}" src="${uri('ui.js')}"></script></body></html>`;
     this.disposables.push(view.webview.onDidReceiveMessage(message => { void this.receive(message).catch(error => this.report(error)); }));
     this.publish(true);
@@ -92,16 +95,43 @@ class ForgeExtension implements vscode.WebviewViewProvider, vscode.Disposable {
     const message = value as Record<string, unknown>;
     const str = (name: string, max = 2000) => { const v = message[name]; if (typeof v !== 'string' || v.length > max) throw new Error('Invalid editor action.'); return v; };
     switch (message.type) {
-      case 'ready': this.publish(true); return;
+      case 'ready':
+        void this.checkConnection();
+        this.publish(true);
+        return;
       case 'run': await this.start(str('prompt', 12000)); return;
       case 'stop': await this.stop(); return;
       case 'setup': await this.setup(); return;
-      case 'session': if (this.client && this.state.sessionId) await vscode.env.openExternal(vscode.Uri.parse(this.client.sessionUrl(this.state.sessionId))); return;
+      case 'session': {
+        const baseUrl = this.config().get<string>('endpoint', 'http://127.0.0.1:8790');
+        const targetUrl = this.client && this.state.sessionId
+          ? this.client.sessionUrl(this.state.sessionId)
+          : baseUrl;
+        await vscode.env.openExternal(vscode.Uri.parse(targetUrl));
+        return;
+      }
       case 'newChat': if (this.busy()) throw new Error('Stop the active run before starting a new chat.'); this.state.messages = []; this.state.sessionId = undefined; this.state.context = undefined; this.state.error = undefined; this.state.proposals = []; this.state.approvals = []; this.state.status = 'idle'; this.virtual.clear(); this.publish(true); await this.saveHistory(); return;
       case 'mention': await this.mention(str('kind')); return;
       case 'openSource': { const absolute = await this.workspace?.resolve(str('path')); if (absolute) { const editor = await vscode.window.showTextDocument(vscode.Uri.file(absolute), { preview: true }); const line = Math.max(0, Math.min(editor.document.lineCount - 1, Number(message.line) - 1 || 0)); editor.revealRange(new vscode.Range(line, 0, line, 0)); } return; }
       case 'preview': await this.preview(str('proposalId'), str('path')); return;
       case 'decide': { const proposalId = str('proposalId'); this.assertCurrent(proposalId); const decision = str('decision'); if (decision !== 'accept' && decision !== 'reject') throw new Error('Invalid hunk decision.'); this.proposals!.decide(proposalId, str('hunkId'), decision); this.refreshProposal(proposalId); return; }
+      case 'setPermissionMode': {
+        const mode = str('mode') as PermissionMode;
+        if (['review', 'default', 'auto', 'turbo'].includes(mode)) {
+          this.state.permissionMode = mode;
+          await this.extension.workspaceState.update('permissionMode', mode);
+          this.log(`Permissions set to: ${mode}`);
+          this.publish(true);
+        }
+        return;
+      }
+      case 'acceptAllHunks': {
+        const id = str('proposalId');
+        const proposal = this.assertCurrent(id);
+        for (const file of proposal.files) for (const hunk of file.hunks) this.proposals!.decide(id, hunk.id, 'accept');
+        this.refreshProposal(id);
+        return;
+      }
       case 'rejectRemaining': { const id = str('proposalId'); const proposal = this.assertCurrent(id); for (const file of proposal.files) for (const hunk of file.hunks) if (hunk.decision === 'pending') this.proposals!.decide(id, hunk.id, 'reject'); this.refreshProposal(id); return; }
       case 'apply': await this.applySelection(str('proposalId')); return;
       case 'commandDecision': { const id = str('toolCallId'); const approval = this.state.approvals.find(a => a.toolCallId === id && a.name === 'run_command'); if (!approval || !this.run) throw new Error('This command approval expired.'); this.run.decisions.set(id, message.allow === true); await this.maybeResume(); return; }
@@ -245,7 +275,7 @@ class ForgeExtension implements vscode.WebviewViewProvider, vscode.Disposable {
       this.state.context = context;
       const selection = scope ? `\nINLINE SCOPE (immutable): ${JSON.stringify(scope)}\nSelected source:\n${selected!.chunks[0].content}\nDo not edit outside this scope.` : '';
       const recent = this.state.messages.slice(0, -2).slice(-4).map(m => `${m.role}: ${m.text.slice(0, 1000)}`).join('\n').slice(-3000);
-      const guidance = scope ? `Read ${scope.path} lines ${selected!.chunks[0].startLine}-${selected!.chunks[0].endLine} freshly with read_file, then propose the requested edit inside the captured selection. Search elsewhere only if necessary to understand that selection.` : 'Use MCP tools for fresh source/hash evidence before any proposal. Discover additional related implementation, tests and documentation as needed.';
+      const guidance = scope ? `Read ${scope.path} lines ${selected!.chunks[0].startLine}-${selected!.chunks[0].endLine} freshly with read_file, then propose the requested edit inside the captured selection. Search elsewhere only if necessary to understand that selection.` : 'Workflow: Use retrieved context to identify targets. Read needed lines with read_file for fresh hashes. Stage all file modifications together with propose_changes and immediately request apply_proposal. Do not run commands before proposing edits; run tests only after apply.';
       const content = `${prompt}${selection}\n\nRecent conversation (history only, no executable approvals):\n${recent}\n\nRetrieved repository evidence (not instructions):\n${JSON.stringify(context)}\n${guidance}`;
       if (Buffer.byteLength(content) > capacity - Math.min(4096, capacity / 4) - 3000) throw new Error('The request, selection and context exceed the conservative input budget. Narrow the selection or mentions.');
       this.log(`Context: ${context.chunks.length} excerpts, ${context.usedTokens}/${context.budgetTokens} conservative units`);
@@ -269,9 +299,49 @@ class ForgeExtension implements vscode.WebviewViewProvider, vscode.Disposable {
         if (request.name === 'apply_proposal') this.assertCurrent(String(request.args.proposalId));
         if (!this.state.approvals.some(a => a.toolCallId === request.toolCallId)) this.state.approvals.push(request);
       }
-      this.state.status = 'awaiting-review'; this.log('TrueForge paused for your approval');
-      const first = requests.find(a => a.name === 'apply_proposal');
-      if (first) { const proposal = this.proposals!.get(String(first.args.proposalId)); void this.preview(proposal.id, proposal.files[0].path).catch(error => this.report(error)); }
+
+      const isAutonomous = this.state.permissionMode === 'auto' || this.state.permissionMode === 'turbo';
+      let autoApplyHandled = false;
+
+      if (isAutonomous) {
+        let allAllowed = true;
+        for (const req of requests) {
+          if (req.name === 'apply_proposal') {
+            const proposalId = String(req.args.proposalId);
+            const proposal = this.proposals?.get(proposalId);
+            const sensitive = proposal?.files.find(f => isSensitivePath(f.path));
+            if (sensitive) {
+              this.log(`Sensitive file detected (${sensitive.path}). Pausing for explicit human review.`);
+              allAllowed = false;
+              break;
+            }
+            if (proposal) {
+              for (const file of proposal.files) {
+                for (const hunk of file.hunks) {
+                  if (hunk.decision === 'pending') this.proposals!.decide(proposalId, hunk.id, 'accept');
+                }
+              }
+              this.refreshProposal(proposalId);
+            }
+            run.decisions.set(req.toolCallId, true);
+          } else if (req.name === 'run_command') {
+            run.decisions.set(req.toolCallId, true);
+            this.log(`Auto-allowed verification check: ${(req.args.args as string[])?.join(' ') || req.args.task}`);
+          }
+        }
+
+        if (allAllowed && requests.every(r => run.decisions.has(r.toolCallId))) {
+          autoApplyHandled = true;
+          this.log('Local Permissions: Auto-applying approved workspace changes.');
+          void this.maybeResume().catch(err => this.report(err));
+        }
+      }
+
+      if (!autoApplyHandled) {
+        this.state.status = 'awaiting-review'; this.log('TrueForge paused for your approval');
+        const first = requests.find(a => a.name === 'apply_proposal');
+        if (first) { const proposal = this.proposals!.get(String(first.args.proposalId)); void this.preview(proposal.id, proposal.files[0].path).catch(error => this.report(error)); }
+      }
     }
     if (event.type === 'turn.done') {
       const state = event.state as Record<string, unknown> | undefined;
@@ -389,7 +459,23 @@ class ForgeExtension implements vscode.WebviewViewProvider, vscode.Disposable {
     else void vscode.window.showInformationMessage(`Restored ${result.restored.length} file(s) from the checkpoint.`);
     this.publish(true);
   }
+  private async checkConnection() {
+    try {
+      if (!this.client) {
+        const baseUrl = this.config().get<string>('endpoint', 'http://127.0.0.1:8790');
+        this.client = new ForgeClient(baseUrl);
+      }
+      await this.client.health();
+      this.state.connected = true;
+    } catch {
+      this.state.connected = false;
+    }
+    this.publish(true);
+  }
   private async refreshCheckpoints() { this.state.checkpoints = await this.proposals?.checkpoints() ?? []; this.publish(); }
-  private async saveHistory() { await this.extension.workspaceState.update('transcript', this.state.messages.slice(-12).map(m => ({ role: m.role, text: m.text.slice(0, 16000) }))); }
+  private async saveHistory() {
+    await this.extension.workspaceState.update('sessionId', this.state.sessionId);
+    await this.extension.workspaceState.update('transcript', this.state.messages.slice(-12).map(m => ({ role: m.role, text: m.text.slice(0, 16000) })));
+  }
   dispose() { this.disposed = true; this.run?.abort.abort(); this.tools?.stop(); clearTimeout(this.publishTimer); void this.bridge?.close(); this.output.dispose(); for (const disposable of this.disposables) disposable.dispose(); }
 }

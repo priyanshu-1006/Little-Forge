@@ -151,3 +151,19 @@ test('EOL equivalence cannot hide ambiguous matches or move an edit outside inli
   await assert.rejects(f.tools.call('propose_changes', { files: [{ path: 'app.py', beforeHash: read.hash, edits: [{ oldText: 'one\r\ntwo', newText: 'changed' }] }] }), /match exactly once/);
   assert.equal(await f.read('app.py'), ambiguous); assert.equal(f.events.proposals.length, 0);
 });
+
+test('repeated search and read operations return helpful anti-loop guidance', async t => {
+  const f = await fixture(t);
+  await f.put('app.py', 'print("hello")\n');
+  const search1 = await f.tools.call('search_workspace', { query: 'print' }) as { matches: unknown[]; guidance?: string };
+  assert.equal(search1.guidance, undefined);
+  const search2 = await f.tools.call('search_workspace', { query: 'print' }) as { matches: unknown[]; guidance?: string; repeatedQuery?: boolean };
+  assert.equal(search2.repeatedQuery, true);
+  assert.match(search2.guidance!, /Repeated search query/);
+
+  const read1 = await f.tools.call('read_file', { path: 'app.py' }) as { guidance?: string };
+  assert.equal(read1.guidance, undefined);
+  const read2 = await f.tools.call('read_file', { path: 'app.py' }) as { guidance?: string; repeatedRead?: boolean };
+  assert.equal(read2.repeatedRead, true);
+  assert.match(read2.guidance!, /already been read/);
+});

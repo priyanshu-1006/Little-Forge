@@ -10,13 +10,15 @@ export class EditorTools {
   active?: ActiveRun;
   private readonly reads = new Map<string, FileSnapshot>();
   private readonly grants = new Map<string, { toolCallId: string; digest: string }>();
+  private readonly searchHistory = new Map<string, number>();
+  private readonly readHistory = new Map<string, number>();
   private readonly runner: CommandRunner;
   constructor(readonly workspace: Workspace, readonly context: ContextEngine, readonly proposals: ProposalManager,
     private readonly hooks: { context: (value: ContextResult) => void; proposal: (id: string) => void; activity: (text: string) => void; assertWritable: (paths: string[]) => void; diagnostics: (paths?: string[]) => unknown }) {
     this.runner = new CommandRunner(workspace);
   }
-  start(run: ActiveRun) { this.reads.clear(); this.grants.clear(); this.active = run; }
-  stop() { if (this.active) this.proposals.discardRun(this.active.id); this.grants.clear(); this.active = undefined; }
+  start(run: ActiveRun) { this.reads.clear(); this.grants.clear(); this.searchHistory.clear(); this.readHistory.clear(); this.active = run; }
+  stop() { if (this.active) this.proposals.discardRun(this.active.id); this.grants.clear(); this.searchHistory.clear(); this.readHistory.clear(); this.active = undefined; }
   authorize(name: string, args: Record<string, unknown>, toolCallId: string) {
     const run = this.requireRun();
     if (name === 'apply_proposal') this.proposals.authorize(String(args.proposalId), run.id, toolCallId);
@@ -41,14 +43,29 @@ export class EditorTools {
   }
   private async dispatch(name: string, args: Record<string, unknown>): Promise<unknown> {
     const run = this.requireRun();
-    this.hooks.activity(name.replaceAll('_', ' '));
+    let activityText = name.replaceAll('_', ' ');
+    if (name === 'search_workspace' && args.query) activityText = `search workspace: "${args.query}"`;
+    else if (name === 'read_file' && args.path) activityText = `read file: ${args.path}`;
+    else if (name === 'run_command') activityText = `run command: ${(args.args as string[])?.join(' ') || args.task}`;
+    this.hooks.activity(activityText);
     if (name === 'get_workspace_map') {
       const files = await this.workspace.list(run.signal);
       return { files: files.slice(0, 200).map(f => f.path), total: files.length, truncated: files.length > 200, guidance: 'Use retrieve_context, search_workspace and find_symbols to discover implementation, tests and documentation.' };
     }
-    if (name === 'search_workspace') return { matches: await this.workspace.search(String(args.query), args.glob as string | undefined, args.limit as number | undefined, run.signal) };
+    if (name === 'search_workspace') {
+      const query = String(args.query ?? '');
+      const key = `${query}:${args.glob ?? ''}`;
+      const count = (this.searchHistory.get(key) ?? 0) + 1;
+      this.searchHistory.set(key, count);
+      const matches = await this.workspace.search(query, args.glob as string | undefined, args.limit as number | undefined, run.signal);
+      const guidance = count > 1
+        ? 'Repeated search query. If target files are found, read them freshly to obtain their hashes and proceed directly to propose_changes.'
+        : undefined;
+      return guidance ? { matches, repeatedQuery: true, guidance } : { matches };
+    }
     if (name === 'read_file') {
-      const file = await this.workspace.read(String(args.path), run.signal);
+      const filePath = String(args.path);
+      const file = await this.workspace.read(filePath, run.signal);
       const lines = file.content.split('\n');
       const start = Math.max(1, Number(args.startLine ?? 1));
       const end = Math.min(lines.length, Number(args.endLine ?? start + 159));
@@ -56,7 +73,13 @@ export class EditorTools {
       const content = lines.slice(start - 1, end).join('\n');
       if (Buffer.byteLength(content) > run.contextBudget) throw new Error('Read exceeds the active context budget; request fewer lines.');
       this.reads.set(file.path, file);
-      return { path: file.path, hash: file.hash, startLine: start, endLine: end, totalLines: lines.length, content, truncated: start > 1 || end < lines.length };
+      const readKey = `${filePath}:${start}-${end}`;
+      const count = (this.readHistory.get(readKey) ?? 0) + 1;
+      this.readHistory.set(readKey, count);
+      const guidance = count > 1
+        ? 'This file range has already been read. Use the returned hash and line content to call propose_changes.'
+        : undefined;
+      return { path: file.path, hash: file.hash, startLine: start, endLine: end, totalLines: lines.length, content, truncated: start > 1 || end < lines.length, ...(guidance ? { repeatedRead: true, guidance } : {}) };
     }
     if (name === 'find_symbols') return { symbols: (await this.context.symbols(args.query as string | undefined, run.signal)).slice(0, 100) };
     if (name === 'retrieve_context') {
@@ -86,6 +109,7 @@ export class EditorTools {
       }
       const proposal = await this.proposals.stage(prepared, run.id, run.scope, run.signal);
       this.hooks.proposal(proposal.id);
+      for (const p of prepared) this.hooks.activity(`staged file: ${p.path}`);
       return { proposalId: proposal.id, files: proposal.files.map(f => ({ path: f.path, hunks: f.hunks.length })), next: 'Request apply_proposal with this proposalId to open the human review checkpoint. No source files have been written.' };
     }
     if (name === 'apply_proposal' || name === 'run_command') {
@@ -97,7 +121,11 @@ export class EditorTools {
         const proposal = this.proposals.get(String(args.proposalId));
         this.hooks.assertWritable(proposal.files.map(f => f.path));
         const result = await this.proposals.apply(proposal.id, run.id, grant.toolCallId, run.signal);
-        if (result.status === 'applied') { run.performedAction = true; this.context.invalidate(); }
+        if (result.status === 'applied') {
+          run.performedAction = true;
+          this.context.invalidate();
+          for (const f of proposal.files) this.hooks.activity(`edited file: ${f.path}`);
+        }
         return result;
       }
       this.hooks.assertWritable([]);
@@ -105,6 +133,8 @@ export class EditorTools {
       const before = await this.fingerprints(run.signal);
       const result = await this.runner.run(args as unknown as CommandInput, run.signal);
       cancelled(run.signal);
+      const cmdStr = (args.args as string[])?.join(' ') || args.task;
+      this.hooks.activity(`ran command: ${cmdStr}${result.exitCode !== null ? ` · Exit code ${result.exitCode}` : ''}`);
       const after = await this.fingerprints(run.signal);
       const changedSource = [...new Set([...before.hashes.keys(), ...after.hashes.keys()])].filter(p => before.hashes.has(p) && after.hashes.has(p) && before.hashes.get(p) !== after.hashes.get(p));
       return { ...result, changedSource, detectionPartial: before.partial || after.partial, warning: changedSource.length ? 'The project check changed source files. These are command side effects; inspect them before proceeding.' : undefined };

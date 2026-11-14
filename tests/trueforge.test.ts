@@ -58,7 +58,7 @@ test('creates provider-independent inline specs and streams original wire events
   await fixture((request, response, body) => {
     if (request.url === '/api/v1/sessions') {
       const spec = (body.agent as { spec: Record<string, unknown> }).spec;
-      assert.deepEqual(spec.model, { name: 'any-provider/tool-model', params: { max_tokens: 4096 } });
+      assert.deepEqual(spec.model, { name: 'any-provider/tool-model', params: { max_tokens: 8192 } });
       const connector = (spec.mcp_servers as Array<Record<string, unknown>>)[0];
       assert.deepEqual(connector.require_approval_for_tools, ['apply_proposal', 'run_command']);
       assert.equal(connector.preload, true);
@@ -87,7 +87,7 @@ test('optional reasoning effort reaches the pinned harness wire schema without c
   let requests=0;
   await fixture((request,response,body)=>{
     requests++; assert.equal(request.url,'/api/v1/sessions');
-    assert.deepEqual((body.agent as {spec:{model:unknown}}).spec.model,{name:'configured/model',params:{max_tokens:4096,reasoning_effort:'medium'}});
+    assert.deepEqual((body.agent as {spec:{model:unknown}}).spec.model,{name:'configured/model',params:{max_tokens:8192,reasoning_effort:'medium'}});
     json(response,{data:{id:'reasoning-session'}},201);
   },async client=>{
     assert.equal(await client.create('configured/model','editor','agent',32768,'medium'),'reasoning-session');

@@ -52,6 +52,40 @@ try {
   assertions.push('Stop remains available during harness review.');
   for (const width of [300,360,520]) { await page.setViewportSize({width,height:1100}); assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)); }
   assertions.push('Review remains within the viewport at 300, 360 and 520px.');
+
+  // Test Antigravity Work Trace user-toggle preservation
+  const runState1 = {
+    ...base,
+    status: 'running',
+    connected: true,
+    model: 'google-gemini/gemini-3-1-flash-lite',
+    messages: [
+      { role: 'user', text: 'Task prompt' },
+      { role: 'assistant', text: '' }
+    ],
+    activity: ['search workspace: flask config', 'read file: src/flask/cli.py']
+  };
+  await page.evaluate(state => window.postMessage({ type: 'state', state }, '*'), runState1);
+  await page.locator('.work-trace').waitFor({ state: 'visible' });
+  assert.equal(await page.evaluate(() => document.querySelector('.work-trace').open), true);
+
+  // User clicks to collapse the Thinking trace
+  await page.locator('.work-trace-summary').click();
+  assert.equal(await page.evaluate(() => document.querySelector('.work-trace').open), false);
+
+  // Subsequent tool action arrives (e.g. edited file / ran command)
+  const runState2 = {
+    ...runState1,
+    activity: [...runState1.activity, 'staged file: src/flask/cli.py', 'ran command: pytest tests/test_cli.py · Exit code 0']
+  };
+  await page.evaluate(state => window.postMessage({ type: 'state', state }, '*'), runState2);
+
+  // Trace MUST remain closed - never reopened automatically by incoming tool steps!
+  assert.equal(await page.evaluate(() => document.querySelector('.work-trace').open), false);
+  // Verify steps were updated in-place inside the closed trace
+  const stepCount = await page.evaluate(() => document.querySelectorAll('.work-step-row').length);
+  assert.equal(stepCount, 4);
+  assertions.push('Antigravity work trace strictly preserves user collapse state during streaming tool updates.');
   await page.locator('main').evaluate(main => { main.scrollTop = main.scrollHeight; });
   const failed = {...base,status:'failed',connected:true,model:'fixture/unreachable',messages:[{role:'user',text:'Failure visibility fixture'}],error:'Cannot connect to the configured model endpoint.',context:{usedTokens:12000,budgetTokens:12000,indexedFiles:222,chunks:Array.from({length:24},(_,i)=>({path:`src/file-${i}.py`,startLine:1,endLine:40,reason:'Retrieved source evidence. '.repeat(10)}))}};
   await page.evaluate(state=>window.postMessage({type:'state',state},'*'),failed);

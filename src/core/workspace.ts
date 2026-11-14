@@ -21,8 +21,11 @@ function denied(message = 'The path is outside the permitted workspace or is pro
 function equalPath(a: string, b: string): boolean { return process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b; }
 function sameFile(a: { dev: number; ino: number }, b: { dev: number; ino: number }): boolean { return a.dev === b.dev && a.ino === b.ino; }
 function missing(error: unknown): boolean { return (error as NodeJS.ErrnoException)?.code === 'ENOENT'; }
+export function isSensitivePath(relative: string): boolean {
+  return relative.replaceAll('\\', '/').split('/').some(part => PRIVATE.test(part) || PRIVATE_EXTENSION.test(part) || /password|secret|credential|token/i.test(part));
+}
 function protectedPath(relative: string): boolean {
-  return relative.split('/').some(part => PRIVATE.test(part) || PRIVATE_EXTENSION.test(part) || GENERATED.has(part.toLowerCase()));
+  return isSensitivePath(relative) || relative.split('/').some(part => GENERATED.has(part.toLowerCase()));
 }
 function normalized(input: string): string {
   if (typeof input !== 'string' || !input || input.length > 4096 || /[\u0000-\u001f\u007f:]/.test(input) || path.isAbsolute(input) || /^[\\/]/.test(input)) denied('Use a relative workspace path without parent traversal, drive names, or control characters.');

@@ -9,13 +9,13 @@
     {"name":"Amitesh Vishwakarma","role":"Member","institution":"","github":""},
     {"name":"Alish Kaushambi","role":"Member","institution":"","github":""}
   ],
-  "localTests": 107,
+  "localTests": 108,
   "nativeC": "Native C rehearsal showed the exact inline request, two bounded connection-refused retries, a clear visible error and editor navigation after failure. All 235 tracked files (1,928,825 bytes) retained identical hashes; Git stayed clean and TrueForge healthy. Physical shortcut and interaction during backoff were not measured. Final video remains pending.",
   "videoUrl": "Not recorded",
-  "repositoryUrl": "Not published",
+  "repositoryUrl": "https://github.com/priyanshu-1006/Little-Forge",
   "scorecard": [
     {"criterion":"A1 Inline edit","max":10,"timestamp":"Not recorded","claim":"Native A review/apply passed 42/42 checks and 35 helper tests; video pending."},
-    {"criterion":"A2 Agent mode","max":10,"timestamp":"Not recorded","claim":"Live B has not yet completed a verified three-file patch."},
+    {"criterion":"A2 Agent mode","max":10,"timestamp":"Not recorded","claim":"Live B completed and verified three-file patch (cli.py, test_cli.py, docs/cli.rst); CLI tests and help pass; footage pending."},
     {"criterion":"A3 Streaming/cancellation","max":10,"timestamp":"Not recorded","claim":"Streaming and cancellation pass harness fixtures; native footage pending."},
     {"criterion":"B1 Context assembly","max":15,"timestamp":"Not recorded","claim":"Unhinted Flask retrieval selected source, tests and docs within budget."},
     {"criterion":"B2 Diff safety","max":10,"timestamp":"Not recorded","claim":"Native hunk accept/reject preview, apply and undo; all 235 hashes restored."},

@@ -163,7 +163,7 @@ export function agentSpec(model: string, bindingName: string, mode: 'inline' | '
   if (!model.trim() || !bindingName.trim()) throw new ForgeError('Choose a configured TrueForge model and editor binding first.');
   if (!Number.isSafeInteger(contextTokens) || contextTokens < 8192 || contextTokens > 1_000_000) throw new ForgeError('Context capacity must be an integer from 8192 to 1000000.');
   if (!['', 'low', 'medium', 'high'].includes(reasoningEffort)) throw new ForgeError('Reasoning effort must be empty (provider default), low, medium or high. Use a level supported by the selected model.');
-  const outputReserve = Math.min(4096, Math.floor(contextTokens / 4));
+  const outputReserve = Math.min(16384, Math.max(8192, Math.floor(contextTokens / 4)));
   return {
     model: { name: model, params: { max_tokens: outputReserve, ...(reasoningEffort ? {reasoning_effort:reasoningEffort} : {}) } },
     instructions: [
@@ -179,8 +179,9 @@ export function agentSpec(model: string, bindingName: string, mode: 'inline' | '
       'After a successful apply, do not propose the same change again. Report the observed result and perform only the checks appropriate to the current mode.',
       'Respect rejections. Do not resubmit rejected changes without an explicit new request. Never execute source-rewriting shell commands.',
       mode === 'inline' ? 'This is inline mode. Restrict all edits to the captured selection and instruction supplied by the user. Terminal commands are unavailable.' : 'This is agent mode. Discover all necessary files without asking the user to name them. After a reviewed apply, use only the structured run_command catalog for appropriate checks; commands require separate approval.',
+      mode === 'agent' ? 'In agent mode, follow an efficient 3-phase progression: 1) Fast discovery: inspect the retrieved context and read fresh hashes for the target files within 2-4 tool calls. Never run tests before proposing edits. 2) Staging: combine all file edits (source, tests, documentation) into a SINGLE propose_changes call with exact replacements, then immediately call apply_proposal. 3) Verification: only after apply_proposal is approved by the user, run the relevant test with run_command.' : '',
       `The configured context capacity is ${contextTokens} tokens. Keep tool observations small and use incremental retrieval; reserve ${outputReserve} tokens for output.`,
-    ].join('\n'),
+    ].filter(Boolean).join('\n'),
     mcp_servers: [{
       name: bindingName,
       enable_tools: [...READ_TOOLS, ...EDIT_TOOLS, ...(mode === 'agent' ? ['run_command'] : [])],
