@@ -58,10 +58,13 @@ export class EditorTools {
       const count = (this.searchHistory.get(key) ?? 0) + 1;
       this.searchHistory.set(key, count);
       const matches = await this.workspace.search(query, args.glob as string | undefined, args.limit as number | undefined, run.signal);
-      const guidance = count > 1
-        ? 'Repeated search query. If target files are found, read them freshly to obtain their hashes and proceed directly to propose_changes.'
-        : undefined;
-      return guidance ? { matches, repeatedQuery: true, guidance } : { matches };
+      let guidance: string | undefined;
+      if (matches.length === 0) {
+        guidance = 'No matches found in repository. If you are searching for the requested command or feature (e.g. config or a new function), remember it does NOT exist yet — you are tasked with CREATING it! Inspect existing commands in src/flask/cli.py to see how commands are registered, then proceed directly to propose_changes.';
+      } else if (count > 1) {
+        guidance = 'Repeated search query. If target files are found, read them freshly to obtain their hashes and proceed directly to propose_changes.';
+      }
+      return guidance ? { matches, ...(count > 1 ? { repeatedQuery: true } : {}), guidance } : { matches };
     }
     if (name === 'read_file') {
       const filePath = String(args.path);
