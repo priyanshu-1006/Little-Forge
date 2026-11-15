@@ -112,6 +112,18 @@ export function parseMentions(prompt: string, files?: FileEntry[], symbols?: Sou
     const kind = match[1] as 'file' | 'symbol';
     const value = (match[2] ?? match[3]!).replace(/^"|"$/g, '').replace(/[.!?]+$/, '');
     if (kind === 'file') {
+      if (value.includes('#')) {
+        const [filePath, symbolName] = value.split('#');
+        const selected = files?.filter(file => matchesPath(file.path, filePath));
+        if (files && selected?.length !== 1) throw new Error(`File mention could not be resolved: ${filePath}. Choose an existing permitted workspace file.`);
+        const resolvedPath = selected?.[0]?.path ?? stablePath(filePath);
+        add({ kind: 'file', path: resolvedPath });
+        if (symbolName) {
+          const sym = symbols?.find(s => s.name === symbolName && matchesPath(s.path, resolvedPath));
+          add({ kind: 'symbol', path: resolvedPath, name: symbolName, line: sym?.line });
+        }
+        continue;
+      }
       const selected = files?.filter(file => matchesPath(file.path, value));
       if (files && selected?.length !== 1) throw new Error(`File mention could not be resolved: ${value}. Choose an existing permitted workspace file.`);
       add({ kind, path: selected?.[0]?.path ?? stablePath(value) });

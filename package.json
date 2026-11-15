@@ -82,6 +82,10 @@
       {
         "command": "littleForge.selfCheck",
         "title": "Little Forge: Run Environment Pre-Flight Check"
+      },
+      {
+        "command": "littleForge.decideHunk",
+        "title": "Little Forge: Decide Proposed Hunk"
       }
     ],
     "keybindings": [
