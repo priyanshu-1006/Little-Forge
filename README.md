@@ -49,7 +49,7 @@ Open a trusted local repository in that window. Open **Little Forge** in the act
 
 **Agent:** describe the change in the panel. Retrieved context cards show paths, line spans, reasons and a conservative budget. The agent can search/read more files through MCP. A source change is staged privately, then the harness pauses before `apply_proposal`.
 
-**Inline:** select saved code and press **Ctrl+Alt+I** (macOS: Cmd+Alt+I), or use **Little Forge: Edit Selection**. Give the instruction. The host refuses proposals that change source outside the captured range.
+**Inline:** select saved code (or place your cursor within a function) and press **Ctrl+I** or **Alt+I** (macOS: Cmd+I / Cmd+Alt+I), or use **Little Forge: Edit Selection**. Give the instruction. The host refuses proposals that change source outside the captured range.
 
 **Mentions:** use the `@file` and `@symbol` buttons to choose precise references, or type `@file(path/to/file.py)` / `@symbol(path/to/file.py#name)`. Duplicate or unresolved symbols are reported. Credentials and ignored/generated files remain excluded.
 

@@ -6,6 +6,7 @@ scripts/**
 .github/**
 test-results/**
 evaluation/workspaces/**
+evaluation/flask/**
 *.vsix
 **/*.log
 tsconfig.json

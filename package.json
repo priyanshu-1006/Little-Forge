@@ -30,7 +30,22 @@
   ],
   "main": "./dist/extension.cjs",
   "activationEvents": [
-    "onView:littleForge.agent"
+    "onView:littleForge.agent",
+    "onCommand:littleForge.inlineEdit",
+    "onCommand:littleForge.open",
+    "onCommand:littleForge.stop",
+    "onCommand:littleForge.undo",
+    "onCommand:littleForge.setup",
+    "onCommand:littleForge.review",
+    "onCommand:littleForge.selfCheck",
+    "onCommand:littleForge.newChat",
+    "onCommand:littleForge.repro",
+    "onCommand:littleForge.quickPlan",
+    "onCommand:littleForge.quickTest",
+    "onCommand:littleForge.isolated",
+    "onCommand:littleForge.exportEvidence",
+    "onCommand:littleForge.draftPullRequest",
+    "onStartupFinished"
   ],
   "capabilities": {
     "untrustedWorkspaces": {
@@ -119,9 +134,24 @@
     "keybindings": [
       {
         "command": "littleForge.inlineEdit",
+        "key": "ctrl+i",
+        "win": "ctrl+i",
+        "mac": "cmd+i",
+        "when": "editorTextFocus"
+      },
+      {
+        "command": "littleForge.inlineEdit",
+        "key": "alt+i",
+        "win": "alt+i",
+        "mac": "alt+i",
+        "when": "editorTextFocus"
+      },
+      {
+        "command": "littleForge.inlineEdit",
         "key": "ctrl+alt+i",
+        "win": "ctrl+alt+i",
         "mac": "cmd+alt+i",
-        "when": "editorTextFocus && editorHasSelection"
+        "when": "editorTextFocus"
       },
       {
         "command": "littleForge.open",
@@ -161,7 +191,7 @@
       "editor/context": [
         {
           "command": "littleForge.inlineEdit",
-          "when": "editorHasSelection",
+          "when": "editorTextFocus",
           "group": "littleForge@1"
         }
       ]
@@ -223,6 +253,7 @@
     }
   },
   "dependencies": {
+    "@google/genai": "^3.6.1",
     "@modelcontextprotocol/sdk": "1.26.0",
     "diff": "8.0.2",
     "highlight.js": "11.11.1",

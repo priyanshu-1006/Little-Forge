@@ -797,10 +797,68 @@ MANDATORY PROTOCOL STEPS:
       if (folder) await this.view?.webview.postMessage({ type: 'insertMention', text: `@folder(${folder.label})` });
     }
   }
+
+  detectEnclosingScope(editor: vscode.TextEditor): vscode.Selection | undefined {
+    const doc = editor.document;
+    const cursor = editor.selection.active;
+    const lineCount = doc.lineCount;
+
+    let defLineIndex = -1;
+    let baseIndent = -1;
+    const defRegex = /^\s*(?:(?:async\s+)?def\s+[A-Za-z0-9_]+|(?:export\s+)?(?:default\s+)?class\s+[A-Za-z0-9_]+|(?:export\s+)?(?:async\s+)?function\b|(?:export\s+)?(?:const|let|var)\s+[A-Za-z0-9_]+\s*=\s*(?:async\s*)?(?:\([^)]*\)|[A-Za-z0-9_]+)\s*=>)/;
+
+    for (let i = cursor.line; i >= 0; i--) {
+      const lineText = doc.lineAt(i).text;
+      if (defRegex.test(lineText)) {
+        defLineIndex = i;
+        baseIndent = lineText.search(/\S/);
+        break;
+      }
+    }
+
+    if (defLineIndex !== -1 && baseIndent !== -1) {
+      let endLineIndex = defLineIndex;
+      for (let i = defLineIndex + 1; i < lineCount; i++) {
+        const lineText = doc.lineAt(i).text;
+        if (/^\s*$/.test(lineText)) continue;
+        const indent = lineText.search(/\S/);
+        if (indent > baseIndent) {
+          endLineIndex = i;
+        } else {
+          break;
+        }
+      }
+
+      if (cursor.line >= defLineIndex && cursor.line <= endLineIndex + 1) {
+        const startPos = new vscode.Position(defLineIndex, 0);
+        const endPos = new vscode.Position(endLineIndex, doc.lineAt(endLineIndex).text.length);
+        return new vscode.Selection(startPos, endPos);
+      }
+    }
+
+    const curLine = doc.lineAt(cursor.line);
+    if (!/^\s*$/.test(curLine.text)) {
+      return new vscode.Selection(new vscode.Position(cursor.line, 0), new vscode.Position(cursor.line, curLine.text.length));
+    }
+
+    return undefined;
+  }
+
   async inline() {
     const editor = vscode.window.activeTextEditor;
-    if (!editor || editor.selection.isEmpty || editor.document.uri.scheme !== 'file') throw new Error('Select a saved region of code first.');
+    if (!editor || editor.document.uri.scheme !== 'file') throw new Error('Open a saved file first.');
     if (editor.document.isDirty) throw new Error('Save the file before requesting an inline edit.');
+
+    if (editor.selection.isEmpty) {
+      const detected = this.detectEnclosingScope(editor);
+      if (detected) {
+        editor.selection = detected;
+        editor.revealRange(detected);
+      } else {
+        throw new Error('Select a saved region of code first.');
+      }
+    }
+
     await this.initialise();
     const relative = this.workspace!.relative(editor.document.uri.fsPath);
     const file = await this.workspace!.read(relative);
@@ -891,7 +949,19 @@ MANDATORY PROTOCOL STEPS:
     this.state.stale = undefined; this.state.review = undefined; this.state.verification = undefined; this.state.retry = undefined; this.state.draftContext = undefined;
     if (evidence.limits.seconds) run.deadline = setTimeout(() => this.stopForBudget(run, 'Time limit reached.'), evidence.limits.seconds * 1000);
     this.run = run; this.state.status = 'connecting'; this.state.error = undefined; this.state.activity = []; this.state.proposals = []; this.state.approvals = []; this.state.context = undefined;
-    this.state.messages.push({ role: 'user', text: scope ? `${prompt}\n\nSelection: ${scope.path}` : prompt }, assistant); this.state.messages = this.state.messages.slice(-20);
+    let selectionLabel = scope?.path || '';
+    if (scope && this.workspace) {
+      try {
+        const fileContent = (await this.workspace.read(scope.path)).content;
+        const snippet = fileContent.slice(scope.start, scope.end);
+        const match = /^\s*(?:(?:async\s+)?def\s+([A-Za-z0-9_]+)|(?:class\s+)?([A-Za-z0-9_]+)|(?:function\s+)?([A-Za-z0-9_]+))/m.exec(snippet);
+        const name = match ? (match[1] || match[2] || match[3]) : undefined;
+        if (name) selectionLabel = `${name} (${scope.path})`;
+      } catch {
+        // keep scope.path
+      }
+    }
+    this.state.messages.push({ role: 'user', text: scope ? `${prompt}\n\nSelected: ${selectionLabel}` : prompt }, assistant); this.state.messages = this.state.messages.slice(-20);
     const capacity = this.config().get<number>('contextTokens', 32768);
     const contextBudget = this.contextBudget(capacity);
     this.publish(true);
