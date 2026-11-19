@@ -13,4 +13,4 @@ Principal dependencies:
 - Zod 4.1.12: https://github.com/colinhacks/zod (MIT).
 - Development tools include TypeScript, esbuild, tsx, VS Code packaging/types and Playwright Core; their original package notices apply.
 
-The extension uses VS Code theme fonts and its own small SVG mark. No parent desktop assets, bundled fonts or external images are redistributed.
+The extension uses VS Code theme fonts and its own small SVG mark. Provider marks for OpenRouter, Cloudflare, Groq, Google Gemini, Cohere, and Vercel are bundled from [Lobe Icons static SVG 1.93.0](https://www.npmjs.com/package/@lobehub/icons-static-svg/v/1.93.0) for provider identification. The marks belong to their respective owners.

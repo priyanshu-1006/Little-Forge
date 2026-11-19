@@ -1,5 +1,20 @@
 # Free model setup for Little Forge
 
+## Select a provider in Little Forge
+
+Click the model button at the top of the panel, or run **Little Forge: Choose Provider and Model** from the VS Code Command Palette. Pick a provider to see its saved models. When connecting a preset, paste the API token into the masked VS Code prompt. TrueForge stores it in its local provider configuration. The picker lists saved models and does not spend model quota. Use **Refresh models** after changing a provider directly in TrueForge.
+
+- **Workers AI** is the first option for Task B. Stay on Workers Free, and use **Workers AI → Use REST API** to create the separate API token. Little Forge can prefill the account ID when the provider draft already exists. The presets are GPT-OSS 120B, GPT-OSS 20B, and GLM-4.7 Flash. [Workers AI setup](https://developers.cloudflare.com/workers-ai/get-started/rest-api/) · [Free allowance](https://developers.cloudflare.com/workers-ai/platform/pricing/)
+- **OpenRouter** includes Particle-1 and GPT-OSS 120B under their explicit `:free` model IDs. [Free model limits](https://openrouter.ai/collections/free-models)
+- **Groq** includes GPT-OSS 120B, GPT-OSS 20B, and Qwen 3.8 27B. Its token-per-minute limit can interrupt a long agent run even if requests remain. [Groq rate limits](https://console.groq.com/docs/rate-limits)
+- **Gemini** uses the existing native Google provider in TrueForge. **Custom** opens TrueForge settings for Ollama or other OpenAI-compatible endpoints. **Cohere** and **Vercel AI Gateway** have their own presets. Usage depends on the plan associated with the key.
+
+For acceptance, select the model in Little Forge, open a clean Task B Flask checkout, and submit the [original Task B prompt](../evaluation/tasks.json) in **Build** mode. Use the [evaluation checklist](../evaluation/README.md#task-b-discover-three-meaningful-files) to verify the proposal, reviews, and tests.
+
+If Workers AI returns HTTP 400 after a repository tool succeeds, start TrueForge via this repository’s `npm run harness` launcher. It sends empty assistant tool-call content as a string for Workers AI Chat Completions. When a recording setup already uses a custom `SQLITE_PATH`, keep that path on restart to retain its saved providers and sessions.
+
+## Earlier Gemini setup and findings
+
 Researched 30 October 2026. **Recommended starting point: Gemini 3.8 Flash on a Google AI Studio project with usable free-tier quota.** This recommendation is based on documented capabilities and limits; real model acceptance is still pending.
 
 ## Why this option

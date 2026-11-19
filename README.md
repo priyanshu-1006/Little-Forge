@@ -33,7 +33,7 @@ npm.cmd run check
 npm.cmd run harness
 ```
 
-Open **http://127.0.0.1:8790**. In **Settings → Models**, add your chosen catalog provider or OpenAI-compatible endpoint and its credentials. API keys stay in TrueForge. For a zero-spend starting point, follow the [Gemini free-tier setup](docs/FREE_MODEL_SETUP.md); provider accounts and usable free quota are required. The launcher pins harness **0.180.1**, keeps its SQLite state in ignored `.trueforge/`, binds localhost, and narrowly allows loopback MCP/model connections through its outbound guard. The local harness needs no Docker, deployed service, external database or login.
+Open Little Forge’s **Providers & models** picker from the model button at the top of the panel. Connect OpenRouter, Cloudflare Workers AI, Groq, Cohere, or Vercel through the picker. Use **TrueForge settings** to manage native Gemini, Ollama, and other OpenAI-compatible endpoints. Credentials are stored in TrueForge. See [free model setup](docs/FREE_MODEL_SETUP.md) for the model presets and recording workflow. The launcher pins harness **0.180.1**, keeps its SQLite state in ignored `.trueforge/`, binds localhost, and narrowly allows loopback MCP/model connections through its outbound guard. The local harness needs no Docker, deployed service, external database or login.
 
 In another terminal, build/package the extension:
 

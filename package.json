@@ -2,7 +2,7 @@
   "name": "little-forge",
   "displayName": "Little Forge",
   "description": "A TrueForge-native coding agent with budgeted repository context and reviewed, undoable edits.",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "publisher": "priyanshu-chaurasia",
   "license": "MIT",
   "repository": {
@@ -43,7 +43,7 @@
     "build": "node scripts/build.mjs",
     "watch": "node scripts/build.mjs --watch",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test tests/*.test.ts",
+    "test": "tsx --test tests/*.test.ts tests/*.test.mjs",
     "check": "npm run typecheck && npm test && npm run build",
     "package": "npm run build && vsce package --no-dependencies --no-rewrite-relative-links",
     "harness": "node scripts/start-harness.mjs",
@@ -73,7 +73,7 @@
       },
       {
         "command": "littleForge.setup",
-        "title": "Little Forge: Connect TrueForge"
+        "title": "Little Forge: Choose Provider and Model"
       },
       {
         "command": "littleForge.review",

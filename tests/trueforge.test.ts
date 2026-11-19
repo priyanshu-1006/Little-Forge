@@ -5,6 +5,7 @@ import { once } from 'node:events';
 import { agentSpec, approvalRequests, consumeSse, ForgeClient, ForgeError, httpRetryHint, indexForgeEvent, providerRetryHint, recoveryFailure } from '../src/trueforge.js';
 import { MAX_RETRY_DELAY_MS, recoveryAction } from '../src/core/resilience.js';
 import type { ForgeEvent } from '../src/core/types.js';
+import { providerGroups, providerPresets, workersAiAccount, workersAiEndpoint } from '../src/core/providers.js';
 
 type Handler = (request: IncomingMessage, response: ServerResponse, body: Record<string, unknown>) => void | Promise<void>;
 async function fixture(handler: Handler, run: (client: ForgeClient) => Promise<void>): Promise<void> {
@@ -44,6 +45,46 @@ test('uses actual health/model endpoints and registers a new header-auth connect
     const binding = { name: 'little-test', url: 'http://127.0.0.1:9876/mcp', token: '12345678901234567890123456789012' };
     await client.registerEditor(binding); await client.registerEditor(binding); assert.equal(registrations, 1);
   });
+});
+
+test('completes a provider draft through TrueForge without exposing the stored token', async () => {
+  const preset = providerPresets.find(entry => entry.id === 'workers-ai')!;
+  const account = 'a'.repeat(32);
+  const endpoint = workersAiEndpoint(account);
+  const models = preset.models!;
+  const names = models.map(model => ({ name: preset.id + '/' + model.name }));
+  let savedAuth: unknown;
+  await fixture((request, response, body) => {
+    assert.equal(request.url, '/api/v1/settings/model-providers');
+    if (request.method === 'GET') {
+      json(response, { data: [{ name: preset.id, manifest: { type: 'custom', base_url: endpoint, models, auth: savedAuth } }] });
+      return;
+    }
+    assert.equal(request.method, 'PUT');
+    assert.deepEqual(body.manifest, { name: preset.id, type: 'custom', base_url: endpoint, models, auth: { api_key: 'fake-test-token' } });
+    savedAuth = { api_key: 'trueforge-redacted' };
+    json(response, {});
+  }, async client => {
+    assert.equal(workersAiAccount(endpoint), account);
+    assert.equal(workersAiAccount(endpoint.replace('api.cloudflare.com', 'example.com')), undefined);
+    assert.throws(() => workersAiEndpoint('invalid'));
+    const before = providerGroups(names, await client.modelProviders()).find(group => group.id === preset.id)!;
+    assert.equal(before.needsToken, true);
+    assert.deepEqual(before.models, []);
+    await client.saveCustomProvider(preset.id, endpoint, models, 'fake-test-token', true);
+    const providers = await client.modelProviders();
+    assert.equal(providers[0].manifest.hasCredential, true);
+    assert.doesNotMatch(JSON.stringify(providers), /api_key|fake-test-token|trueforge-redacted/);
+    const after = providerGroups(names, providers).find(group => group.id === preset.id)!;
+    assert.deepEqual(after.models.map(model => model.name), names.map(model => model.name));
+  });
+});
+
+test('provider preset aliases satisfy the harness naming rules while retaining exact upstream IDs', () => {
+  const presets = providerPresets.flatMap(preset => preset.models ?? []);
+  assert.ok(presets.every(model => /^[a-z][a-z0-9-]{0,62}[a-z0-9]$/.test(model.name)));
+  assert.ok(presets.some(model => model.model_id === 'particle-ai/particle-1:free'));
+  assert.ok(presets.some(model => model.model_id === 'qwen/qwen3.8-27b'));
 });
 
 test('refuses nonlocal and credential-bearing URLs, redirects and binding collisions', async () => {
