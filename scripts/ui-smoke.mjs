@@ -126,6 +126,55 @@ try {
   for (const width of [300,360,520]) { await page.setViewportSize({width,height:1100}); assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)); }
   assertions.push('Review remains within the viewport at 300, 360 and 520px.');
 
+  // Test modern command permission card & crossing out (dismissal)
+  const approvalState = {
+    ...base,
+    status: 'awaiting-review',
+    connected: true,
+    model: 'configured/provider',
+    proposals: [{ ...proposal, id: 'fixture-dismiss', state: 'applied' }],
+    approvals: [{ name: 'run_command', args: { task: 'pytest', args: ['tests/repro.py'] }, toolCallId: 'cmd_1', threadId: 'main' }]
+  };
+  await page.evaluate(s => window.postMessage({ type: 'state', state: s }, '*'), approvalState);
+  await page.locator('.command-card').waitFor({ state: 'visible' });
+  assert.equal(await page.locator('.command-prompt-symbol').textContent(), '$');
+  assert.match(await page.locator('.command-cli-code').textContent(), /pytest tests\/repro\.py/);
+  assert.equal(await page.locator('.command-card .card-dismiss-btn').count(), 1);
+
+  // Click Allow once
+  await page.getByRole('button', { name: 'Allow once' }).click();
+  const cmdAction = await page.evaluate(() => window.__actions.find(a => a.type === 'commandDecision' && a.toolCallId === 'cmd_1'));
+  assert.equal(cmdAction?.allow, true);
+  assert.match(await page.locator('.command-status-msg').textContent(), /Command allowed/);
+
+  // Dismiss command card
+  await page.locator('.command-card .card-dismiss-btn').click();
+  assert.equal(await page.locator('.command-card').count(), 0);
+  const approvedChoices = await page.evaluate(() => window.__actions.filter(a => a.toolCallId === 'cmd_1'));
+  assert.deepEqual(approvedChoices, [{ type:'commandDecision', toolCallId:'cmd_1', allow:true }]);
+
+  // Dismiss applied proposal (change acceptor)
+  assert.equal(await page.locator('.review').count(), 1);
+  await page.locator('.review .review-dismiss-action').click();
+  assert.equal(await page.locator('.review').count(), 0);
+  assert.equal(await page.evaluate(() => window.__actions.some(a => a.proposalId === 'fixture-dismiss')), false);
+
+  const pendingProposal = {...proposal, id:'fixture-pending-dismiss', state:'pending'};
+  const pendingState = {...approvalState, proposals:[pendingProposal], approvals:[
+    {...approvalState.approvals[0], toolCallId:'cmd_2'},
+    {...approvalState.approvals[0], toolCallId:'cmd_3', args:{task:'pytest', args:['tests/another.py']}},
+    { name:'apply_proposal', args:{proposalId:pendingProposal.id}, toolCallId:'apply_2', threadId:'main' },
+  ]};
+  await page.evaluate(s => window.postMessage({type:'state', state:s}, '*'), pendingState);
+  await page.locator('.review').waitFor();
+  assert.equal(await page.locator('.review .card-dismiss-btn').count(), 0);
+  await page.locator('.command-card', {hasText:'tests/repro.py'}).getByTitle('Deny and dismiss request').click();
+  assert.deepEqual(await page.evaluate(() => window.__actions.filter(a => a.toolCallId === 'cmd_2')),
+    [{ type:'commandDecision', toolCallId:'cmd_2', allow:false }]);
+  assert.equal(await page.locator('.command-card', {hasText:'tests/another.py'}).isVisible(), true);
+  assert.equal(await page.locator('.review').isVisible(), true);
+  assertions.push('Card dismissal keeps pending hunk review and other approvals visible, with a single decision for each command.');
+
   // Test Antigravity Work Trace user-toggle preservation
   const runState1 = {
     ...base,

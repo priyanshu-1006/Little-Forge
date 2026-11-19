@@ -251,6 +251,7 @@ header {
 .chat-controls-group {
   display: flex;
   align-items: center;
+  flex-wrap: nowrap;
   gap: 4px;
   flex: 0 0 auto;
   flex-shrink: 0;
@@ -913,9 +914,17 @@ header {
   padding: 10px;
 }
 
-.signal-card.low { border-left: 3px solid #38bdf8; }
-.signal-card.medium { border-left: 3px solid #fbbf24; }
-.signal-card.high { border-left: 3px solid #f87171; }
+.signal-card {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: var(--radius-sm);
+  padding: 10px;
+  background: rgba(255, 255, 255, 0.02);
+  margin-bottom: 8px;
+}
+
+.signal-card.low { border-color: rgba(56, 189, 248, 0.25); }
+.signal-card.medium { border-color: rgba(251, 191, 36, 0.25); }
+.signal-card.high { border-color: rgba(248, 113, 113, 0.3); }
 
 .signal-header {
   display: flex;
@@ -956,46 +965,229 @@ header {
   display: block;
 }
 
-/* Command Check Card */
+/* Command Check Card (Modern Agent CLI Style) */
 .command-card {
-  border: 1px solid var(--line);
-  background: var(--panel);
-  border-radius: var(--radius-sm);
-  padding: 10px 12px;
-  margin: 10px 0;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: #14181f;
+  border-radius: var(--radius-md);
+  padding: 12px;
+  margin: 12px 0;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2);
+  transition: all 0.2s ease;
 }
 
 .command-card-header {
   display: flex;
   align-items: center;
-  gap: 6px;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.command-header-left {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.command-header-icon {
+  color: #38bdf8;
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.command-card-title {
   font-size: 11.5px;
   font-weight: 600;
-  color: var(--ink);
-  margin-bottom: 6px;
+  color: #e6edf3;
+  white-space: nowrap;
 }
 
-.command-pill {
-  font: 11px var(--vscode-editor-font-family, monospace);
-  background: rgba(0, 0, 0, 0.3);
-  border: 1px solid var(--line);
+.command-badge-tag {
+  font-size: 9px;
+  font-weight: 600;
+  padding: 1.5px 6px;
+  border-radius: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  flex-shrink: 0;
+}
+
+.command-badge-tag.required {
+  background: rgba(245, 158, 11, 0.12);
+  border: 1px solid rgba(245, 158, 11, 0.25);
+  color: #fbbf24;
+}
+
+.command-badge-tag.allowed {
+  background: rgba(46, 160, 67, 0.12);
+  border: 1px solid rgba(46, 160, 67, 0.25);
+  color: #4ade80;
+}
+
+.command-badge-tag.denied {
+  background: rgba(248, 81, 73, 0.12);
+  border: 1px solid rgba(248, 81, 73, 0.25);
+  color: #f87171;
+}
+
+.card-dismiss-btn {
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 3px;
   border-radius: 4px;
-  padding: 5px 8px;
-  color: var(--accent);
-  margin: 4px 0;
-  overflow-x: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.15s ease;
+  line-height: 1;
+  flex-shrink: 0;
 }
 
-.command-hint {
+.card-dismiss-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--ink);
+}
+
+.command-cli-box {
+  background: #0d1117;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 6px;
+  padding: 8px 10px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 6px 0;
+}
+
+.command-cli-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  overflow-x: auto;
+  min-width: 0;
+  flex: 1;
+}
+
+.command-prompt-symbol {
+  color: #3fb950;
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-weight: 700;
+  font-size: 12px;
+  user-select: none;
+  flex-shrink: 0;
+}
+
+.command-cli-code {
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 11px;
+  color: #e6edf3;
+  white-space: nowrap;
+}
+
+.command-copy-btn {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 4px;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 2.5px 7px;
+  font-size: 10px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+  transition: all 0.15s ease;
+  flex-shrink: 0;
+}
+
+.command-copy-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: #ffffff;
+  border-color: rgba(255, 255, 255, 0.2);
+}
+
+.command-security-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   font-size: 10px;
   color: var(--muted);
-  margin: 4px 0 8px;
+  margin: 4px 0 10px;
+}
+
+.command-security-icon {
+  color: #8b949e;
+  display: inline-flex;
+  flex-shrink: 0;
 }
 
 .command-actions {
   display: flex;
-  gap: 6px;
+  align-items: center;
   justify-content: flex-end;
+  gap: 6px;
+}
+
+.command-action-btn {
+  font-size: 10.5px;
+  font-weight: 600;
+  padding: 4px 10px;
+  border-radius: 5px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  transition: all 0.15s ease;
+}
+
+.command-deny-btn {
+  background: rgba(248, 81, 73, 0.08);
+  border: 1px solid rgba(248, 81, 73, 0.25);
+  color: #fca5a5;
+}
+
+.command-deny-btn:hover {
+  background: rgba(248, 81, 73, 0.16);
+  border-color: rgba(248, 81, 73, 0.4);
+  color: #f87171;
+}
+
+.command-allow-btn {
+  background: #238636;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: #ffffff;
+}
+
+.command-allow-btn:hover {
+  background: #2ea043;
+}
+
+.command-status-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+}
+
+.command-status-msg {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10.5px;
+  font-weight: 600;
+}
+
+.command-status-msg.allowed {
+  color: #4ade80;
+}
+
+.command-status-msg.denied {
+  color: #f87171;
 }
 
 .pill {
@@ -1751,44 +1943,83 @@ code.inline-code {
 
 /* Diff Proposals & Review */
 .review {
-  border: 1px solid rgba(45, 212, 191, 0.3);
+  border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: var(--radius-md);
   overflow: hidden;
   margin: 14px 0;
-  background: var(--panel);
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
+  background: #14181f;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2);
+  transition: all 0.2s ease;
 }
 
 .review-header {
-  padding: 10px 12px;
-  background: rgba(45, 212, 191, 0.05);
-  border-bottom: 1px solid var(--line);
+  padding: 8px 12px;
+  background: rgba(255, 255, 255, 0.03);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 8px;
+}
+
+.review-header-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
 }
 
 .review-header strong {
-  font-size: 12px;
-  font-weight: 700;
+  font-size: 11.5px;
+  font-weight: 600;
   color: var(--ink);
+  white-space: nowrap;
 }
 
-.review-header small {
-  color: var(--accent);
-  font-size: 10.5px;
+.review-status-pill {
+  font-size: 9.5px;
   font-weight: 600;
+  padding: 1.5px 7px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.review-status-pill.pending {
+  background: rgba(245, 158, 11, 0.12);
+  border-color: rgba(245, 158, 11, 0.25);
+  color: #fbbf24;
+}
+
+.review-status-pill.applied {
+  background: rgba(46, 160, 67, 0.12);
+  border-color: rgba(46, 160, 67, 0.25);
+  color: #4ade80;
+}
+
+.review-status-pill.rejected {
+  background: rgba(248, 81, 73, 0.12);
+  border-color: rgba(248, 81, 73, 0.25);
+  color: #f87171;
+}
+
+.review-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
 }
 
 .file-head {
   display: flex;
   gap: 8px;
   align-items: center;
-  padding: 8px 10px;
+  padding: 7px 10px;
   background: rgba(255, 255, 255, 0.02);
   font: 11px var(--vscode-editor-font-family, monospace);
   font-weight: 600;
-  border-bottom: 1px solid var(--line);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
   color: var(--ink);
 }
 
@@ -1802,8 +2033,8 @@ code.inline-code {
 }
 
 .hunk {
-  padding: 0 8px 8px;
-  border-bottom: 1px solid var(--line);
+  padding: 4px 10px 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
 }
 
 .hunk:last-child {
@@ -1832,15 +2063,16 @@ code.inline-code {
 }
 
 .hunk pre.before {
-  background: var(--red-soft);
-  border-left: 3px solid var(--red);
+  background: rgba(248, 81, 73, 0.09);
+  border: 1px solid rgba(248, 81, 73, 0.22);
   color: #fda4af;
 }
 
 .hunk pre.after {
-  background: var(--green-soft);
-  border-left: 3px solid var(--green);
+  background: rgba(46, 160, 67, 0.09);
+  border: 1px solid rgba(46, 160, 67, 0.22);
   color: #6ee7b7;
+  margin-top: 4px;
 }
 
 .hunk-actions {
@@ -1883,6 +2115,48 @@ code.inline-code {
   display: flex;
   flex-direction: column;
   gap: 6px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.review-resolved-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 2px 0;
+}
+
+.review-resolved-msg {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.review-resolved-msg.applied {
+  color: #4ade80;
+}
+
+.review-resolved-msg.rejected {
+  color: #f87171;
+}
+
+.review-dismiss-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3.5px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: var(--ink);
+}
+
+.review-dismiss-action:hover {
+  background: rgba(255, 255, 255, 0.12);
+  border-color: rgba(255, 255, 255, 0.2);
 }
 
 .primary {
@@ -2402,16 +2676,16 @@ body.vscode-light .primary, body.vscode-high-contrast-light .primary {
    ======================================================== */
 .impact-radar-card {
   margin: 8px 0;
-  background: var(--panel);
-  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: var(--radius-sm);
-  padding: 10px;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+  padding: 8px 10px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
 }
 
-.impact-radar-card.high { border-left: 3px solid #f87171; }
-.impact-radar-card.medium { border-left: 3px solid #fbbf24; }
-.impact-radar-card.low { border-left: 3px solid #38bdf8; }
+.impact-radar-card.high { border-color: rgba(248, 113, 113, 0.3); }
+.impact-radar-card.medium { border-color: rgba(251, 191, 36, 0.25); }
+.impact-radar-card.low { border-color: rgba(56, 189, 248, 0.2); }
 
 .impact-header {
   display: flex;

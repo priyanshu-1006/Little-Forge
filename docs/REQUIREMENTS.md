@@ -8,11 +8,11 @@ The new extension is separate from Little_Code's desktop product. Its runtime bo
 
 | Gate from the brief | Required implementation or evidence | Current status |
 | --- | --- | --- |
-| VS Code extension is a TrueForge client | Real sessions, turns and streamed events rendered in the editor | Native A and C rehearsals observed actual sessions, tools and progress; complete B/video pending |
+| VS Code extension is a TrueForge client | Real sessions, turns and streamed events rendered in the editor | Native A and C rehearsals and live Task B observed actual sessions, tools and progress. Final video pending. |
 | Harness owns the agent loop | No direct model calls or retained Little_Code loop | Architecture separates the loop; inspect final bundle and real session before claiming eligibility |
-| Editor capabilities are MCP tools | Read, search, staged proposal/apply and reviewed command execution | Real harness fixture trace passed; live model/editor Task B pending |
+| Editor capabilities are MCP tools | Read, search, staged proposal/apply and reviewed command execution | Real harness fixture passed, and live Task B applied four approved files through TrueForge. |
 | TrueForge runs locally | Reproducible pinned local startup and tested configuration | Local 0.180.1 startup and fixture configuration passed; independent clean machine pending |
-| Model is configured in TrueForge | Catalog or compatible endpoint; user can switch models | Saved Google provider and seven aliases verified; actual free Flash-Lite A passed; automatic second-model fallback remains unverified |
+| Model is configured in TrueForge | Catalog or compatible endpoint; user can switch models | Gemini Flash-Lite passed A and OpenRouter Particle-1 Free passed B. Automatic second-model fallback remains unverified. |
 | Agent definition is shipped | The exact tested definition and secret-free example config | agentSpec() and wire examples included; real harness accepted generated definition |
 | Declared reuse and compatible open-source license | Exact source ancestry, preserved notices and dependency licenses | Publication audit pending; package metadata alone does not prove compliance |
 
@@ -26,7 +26,7 @@ The new extension is separate from Little_Code's desktop product. Its runtime bo
 | Diff review and undo | Immutable proposal snapshots, hunk decisions, grants, journals and guarded undo | Independently accept/reject hunks before source writes; show restoration of an applied change; preserve later manual changes |
 | Streaming and cancellation | Harness events, host run revocation and cancellation-aware tools | Streaming visible and editor responsive; late events inert; no partial application after Stop |
 
-The proposal subsystem has targeted automated coverage for selective hunks, staging without writes, stale hashes, one-use grants, cancellation rollback, conflict-preserving undo, create/delete/empty files, inline bounds and actual child-process crash recovery. Separate native A evidence now shows actual per-hunk review/apply/undo, 42 strict checks and 35 helper tests; all 235 hashes were restored. Native C shows refused-endpoint retries, clear error and navigation after failure, with unchanged source. B, physical shortcut, native mid-stream Stop and final video remain separate gates. See [verification status](VERIFICATION.md).
+The proposal subsystem covers selective hunks, staging, stale hashes, one-use grants, rollback, undo, file operations and inline bounds. Native A passed 42 strict checks and 35 helper tests, with all 235 hashes restored after undo. Live B passed 37 acceptance checks and 59 CLI tests. Native C showed bounded refused-endpoint retries, a visible error and unchanged source. The physical shortcut, native mid-stream Stop and final video still require evidence. See [verification status](VERIFICATION.md).
 
 ## Scoring evidence
 

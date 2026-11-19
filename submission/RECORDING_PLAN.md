@@ -40,4 +40,4 @@ These are planned intervals only. Replace the scorecard's pending timestamps wit
 
 ## Current release gate
 
-Native A has passed 42 strict checks and 35 helper tests after actual hunk review/apply, with checkpoint undo restoring all 235 hashes. Native C has passed its refused-endpoint rehearsal. B still needs a successful real-model three-file change and native review. Physical shortcut, native Stop, the complete A/B/C recording and useful harness compaction in B remain to be captured. Do not label the existing still captures as the required video. The final public upload and portal submission follow review of the actual repository, PDF and video.
+Native A passed 42 strict checks and 35 helper tests, and checkpoint undo restored all 235 hashes. Native C passed its refused-endpoint rehearsal. OpenRouter Particle-1 Free applied four approved B files, and the verifier passed 37 checks and 59 CLI tests. Capture the physical shortcut, native Stop, the B session and useful harness context behavior in the final A/B/C recording. Review the exported video, short PDF and repository before sharing the final public links.
