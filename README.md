@@ -100,7 +100,7 @@ npm.cmd run evaluate:retrieval
 
 The real-harness spike uses its own isolated local harness and a deterministic OpenAI-compatible **test fixture**, not real model reasoning. It verifies eager MCP tool exposure, reads, staging, harness approval, apply/undo, denial, late-grant rejection, streaming cancellation and model HTTP failures. It makes no paid API calls. `test:ui` uses installed Chrome (or `FORGE_BROWSER_CHANNEL=msedge`) to exercise the exact webview renderer with message fixtures. Native host smoke is separate.
 
-Task B passed on the pinned Flask checkout with OpenRouter Particle-1 Free. TrueForge applied an approved four-file change, and independent verification passed all 37 acceptance checks and 59 Flask CLI tests. Task A and C have separate native rehearsals. The final recording, video timestamps and submission are pending. See [verification status](docs/VERIFICATION.md), [live acceptance notes](docs/LIVE_TEST_STATUS.md), [requirements and limitations](docs/REQUIREMENTS.md), and [fixed Flask evaluation](evaluation/README.md).
+Task B passed on the pinned Flask checkout with OpenRouter Particle-1 Free. TrueForge applied an approved four-file change, and independent verification passed all 37 acceptance checks and 59 Flask CLI tests. Task A and C have separate native rehearsals. The final recording, video timestamps and submission are pending. See [video demonstration script](VIDEO_SCRIPT.md), [verification status](docs/VERIFICATION.md), [live acceptance notes](docs/LIVE_TEST_STATUS.md), [requirements and limitations](docs/REQUIREMENTS.md), and [fixed Flask evaluation](evaluation/README.md).
 
 ## Starting point, licence and submission
 
