@@ -1,9 +1,25 @@
 import * as path from 'node:path';
 import * as fs from 'node:fs/promises';
+import { setTimeout as delay } from 'node:timers/promises';
 import { cancelled, type ContextChunk, type ContextResult, type FileEntry, type Mention, type SelectionScope } from './types.js';
 import { Workspace, WorkspaceError, WORKSPACE_LIMITS } from './workspace.js';
 
 export const CONTEXT_LIMITS = Object.freeze({ indexBytes: 8 * 1024 * 1024, indexChars: 96000, symbolsPerFile: 160, termsPerFile: 600, chunks: 12, chunkChars: 3400, chunkLines: 44, candidates: 30 });
+
+class ContextChangedError extends Error {
+  constructor() { super('Repository context changed during indexing. Wait for saves or sync to finish and run again.'); }
+}
+
+export async function retryContextOnChange<T>(collect: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    cancelled(signal);
+    try { return await collect(); }
+    catch (error) {
+      if (!(error instanceof ContextChangedError) || attempt === 2) throw error;
+      await waitFor(delay(100 * (attempt + 1)), signal);
+    }
+  }
+}
 const INDEXABLE = /\.(?:[cm]?[jt]sx?|pyi?|rst|mdx?|txt|jsonc?|ya?ml|toml|ini|cfg|conf|css|scss|html?|go|rs|java|c|h|cpp|hpp|cs|rb|php|vue|svelte|sql|graphql)$/i;
 const IGNORE_POLICIES = new Set(['.gitignore', '.littleignore', '.littleforgeignore']);
 function indexable(file: string): boolean { return INDEXABLE.test(file) || !path.posix.extname(file); }
@@ -227,7 +243,7 @@ export class ContextEngine {
       const signature = inventorySignature(files, this.workspace.listingTruncated);
       this.buildingFiles = files;
       await this.settleFileEvents(signal);
-      if (revision !== this.revision) throw new Error('Repository context changed during indexing. Try the run again.');
+      if (revision !== this.revision) throw new ContextChangedError();
       if (this.cached?.signature === signature) return this.cached;
       const indexed: IndexedFile[] = [];
       let bytes = 0, truncated = this.workspace.listingTruncated || files.length >= WORKSPACE_LIMITS.files;
@@ -249,7 +265,7 @@ export class ContextEngine {
       const freshFiles = (await this.files(signal)).filter(file => indexable(file.path));
       const freshSignature = inventorySignature(freshFiles, this.workspace.listingTruncated);
       await this.settleFileEvents(signal);
-      if (revision !== this.revision || freshSignature !== signature) throw new Error('Repository context changed during indexing. Try the run again.');
+      if (revision !== this.revision || freshSignature !== signature) throw new ContextChangedError();
       const index = { files, indexed, signature, truncated };
       this.cached = index; return index;
     })();

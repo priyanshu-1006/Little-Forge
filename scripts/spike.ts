@@ -51,6 +51,7 @@ async function integration(): Promise<void> {
     return result;
   });
   let modelCalls = 0;
+  const fixtureApiToken = 'local-deterministic-provider-token';
   let scenarioStep = 0;
   let scenario: string = 'apply';
   let fixtureStreamClosed = false;
@@ -61,6 +62,7 @@ async function integration(): Promise<void> {
       const buffers: Buffer[] = []; for await (const chunk of request) buffers.push(Buffer.from(chunk));
       const body = JSON.parse(Buffer.concat(buffers).toString()) as { model?: string; tools?: Array<{ function: { name: string } }> };
       assert.match(request.url ?? '', /\/chat\/completions$/);
+      assert.equal(request.headers.authorization, 'Bearer ' + fixtureApiToken);
       modelCalls++;
       if (scenario === 'auth-failure' || scenario === 'transient-failure') {
         const status = scenario === 'auth-failure' ? 401 : 503;
@@ -122,8 +124,13 @@ async function integration(): Promise<void> {
     }
     assert.ok(healthy, `Harness did not become healthy. ${log.slice(-1800)}`);
     const models = ['scripted', 'scripted-review'].map(name => ({ name, model_id: name, properties: { context_length: 32768, max_output_tokens: 4096 } }));
-    const configured = await fetch(`${harnessUrl}/api/v1/settings/model-providers`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ manifest: { type: 'custom', name: 'spike-fixture', base_url: `http://127.0.0.1:${modelAddress.port}/v1`, models } }) });
-    assert.equal(configured.status, 201, await configured.text());
+    const endpoint = `http://127.0.0.1:${modelAddress.port}/v1`;
+    await client.saveCustomProvider('spike-fixture', endpoint, models);
+    assert.equal((await client.modelProviders()).find(provider => provider.name === 'spike-fixture')?.manifest.hasCredential, false);
+    await client.saveCustomProvider('spike-fixture', endpoint, models, fixtureApiToken, true);
+    const saved = (await client.modelProviders()).find(provider => provider.name === 'spike-fixture');
+    assert.equal(saved?.manifest.hasCredential, true);
+    assert.doesNotMatch(JSON.stringify(saved), /local-deterministic-provider-token|api_key/);
     await client.registerEditor(editor);
     const sessionId = await client.create('spike-fixture/scripted', editor.name, 'agent', 32768);
     const events: ForgeEvent[] = [];

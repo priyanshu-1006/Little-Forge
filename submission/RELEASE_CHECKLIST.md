@@ -34,10 +34,10 @@ The result is `output/pdf/Little_Forge_Round1_Writeup_Draft.pdf`, three pages wi
 
 ## Final gates
 
-Native A and C have passed the rehearsals documented in `docs/VERIFICATION.md`. A passed 42 strict checks and 35 helper tests after visible per-hunk review/apply; its native undo restored 235 hashes. C showed bounded refused-endpoint retries, visible failure, navigation after failure and unchanged hashes. These are saved captures/receipts, not the required final video. The leader's GitHub handle is confirmed; other identity fields are intentionally left for the team to update.
+Native A and C have passed the rehearsals documented in `docs/VERIFICATION.md`. A passed 42 strict checks and 35 helper tests, with all 235 hashes restored by undo. C showed bounded refused-endpoint retries and navigation with unchanged source. Live B applied a four-file patch and passed 37 acceptance checks and 59 CLI tests. The final video and remaining team details are pending.
 
 - Exact live A passes complete behavior/docstring checks and native review/undo is visible.
-- Exact live B discovers and meaningfully changes at least three files without file hints, passes CLI tests, prints masked JSON and shows the real TrueForge session.
+- Record B discovery and review with the exact prompt and no file hints. Show the real session, full passing CLI tests, help, and masked JSON.
 - Native C shows a responsive editor, clear model-endpoint failure and unchanged source/status.
 - A/B/C recording is legible, in order and at most four minutes. Fill every scorecard timestamp from that exported recording.
 - Confirm team information and all used model/cost/tool disclosures.

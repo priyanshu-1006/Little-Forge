@@ -150,16 +150,30 @@ try {
   // Dismiss command card
   await page.locator('.command-card .card-dismiss-btn').click();
   assert.equal(await page.locator('.command-card').count(), 0);
-  const dismissCmd = await page.evaluate(() => window.__actions.find(a => a.type === 'dismissApproval' && a.toolCallId === 'cmd_1'));
-  assert.ok(dismissCmd, 'Dismiss approval message must be sent');
+  const approvedChoices = await page.evaluate(() => window.__actions.filter(a => a.toolCallId === 'cmd_1'));
+  assert.deepEqual(approvedChoices, [{ type:'commandDecision', toolCallId:'cmd_1', allow:true }]);
 
   // Dismiss applied proposal (change acceptor)
   assert.equal(await page.locator('.review').count(), 1);
   await page.locator('.review .review-dismiss-action').click();
   assert.equal(await page.locator('.review').count(), 0);
-  const dismissProp = await page.evaluate(() => window.__actions.find(a => a.type === 'dismissProposal' && a.proposalId === 'fixture-dismiss'));
-  assert.ok(dismissProp, 'Dismiss proposal message must be sent');
-  assertions.push('Modern command permission box displays CLI prompt, allows decision, and both permission and change acceptor can be crossed out.');
+  assert.equal(await page.evaluate(() => window.__actions.some(a => a.proposalId === 'fixture-dismiss')), false);
+
+  const pendingProposal = {...proposal, id:'fixture-pending-dismiss', state:'pending'};
+  const pendingState = {...approvalState, proposals:[pendingProposal], approvals:[
+    {...approvalState.approvals[0], toolCallId:'cmd_2'},
+    {...approvalState.approvals[0], toolCallId:'cmd_3', args:{task:'pytest', args:['tests/another.py']}},
+    { name:'apply_proposal', args:{proposalId:pendingProposal.id}, toolCallId:'apply_2', threadId:'main' },
+  ]};
+  await page.evaluate(s => window.postMessage({type:'state', state:s}, '*'), pendingState);
+  await page.locator('.review').waitFor();
+  assert.equal(await page.locator('.review .card-dismiss-btn').count(), 0);
+  await page.locator('.command-card', {hasText:'tests/repro.py'}).getByTitle('Deny and dismiss request').click();
+  assert.deepEqual(await page.evaluate(() => window.__actions.filter(a => a.toolCallId === 'cmd_2')),
+    [{ type:'commandDecision', toolCallId:'cmd_2', allow:false }]);
+  assert.equal(await page.locator('.command-card', {hasText:'tests/another.py'}).isVisible(), true);
+  assert.equal(await page.locator('.review').isVisible(), true);
+  assertions.push('Card dismissal keeps pending hunk review and other approvals visible, with a single decision for each command.');
 
   // Test Antigravity Work Trace user-toggle preservation
   const runState1 = {
@@ -367,6 +381,39 @@ try {
   assert.equal(repro.errorText, 'A failure to reproduce');
   assert.equal(repro.stackTrace, 'A stack trace');
   assertions.push('Diagnostic state refreshes preserve both fields of a reproduction draft.');
+
+  const providerState = { ...base, connected:true, model:'google-gemini/fixture', providers:[
+    { id:'openrouter', label:'OpenRouter', note:'Free routes', needsToken:false, models:[{ name:'openrouter/particle-1-free', label:'particle-1-free' }] },
+    { id:'workers-ai', label:'Workers AI', note:'Daily free allowance', needsToken:true, models:[], presets:['gpt-oss-120b', 'gpt-oss-20b', 'glm-4-7-flash'] },
+    { id:'groq', label:'Groq', note:'Fast inference', needsToken:false, models:[] },
+    { id:'gemini', label:'Gemini', note:'Google AI Studio', needsToken:false, models:[{ name:'google-gemini/fixture', label:'fixture' }] },
+    { id:'cohere', label:'Cohere', note:'Evaluation key', needsToken:false, models:[] },
+    { id:'vercel', label:'Vercel', note:'Usage credits', needsToken:false, models:[] },
+    { id:'custom', label:'Custom', note:'OpenAI-compatible endpoint', needsToken:false, models:[] },
+  ] };
+  await page.setViewportSize({width:280,height:700});
+  await page.evaluate(state => window.postMessage({type:'state',state},'*'), providerState);
+  await page.locator('#model').click();
+  const providers = page.locator('#provider-drawer');
+  await providers.getByRole('heading', {name:'Gemini'}).waitFor();
+  await page.waitForFunction(() => [...document.querySelectorAll('#provider-options img')].every(img => img.complete && img.naturalWidth));
+  assert.equal(await providers.locator('#provider-options img').count(), 6);
+  await providers.getByRole('button', {name:'Workers AI'}).click();
+  await providers.getByText('API token needed').waitFor();
+  await providers.getByText('gpt-oss-120b', {exact:true}).waitFor();
+  await page.screenshot({path:'test-results/ui/providers-narrow.png'});
+  await providers.getByRole('button', {name:'Add API token'}).click();
+  assert.deepEqual(await page.evaluate(() => window.__actions.at(-1)), {type:'configureProvider',provider:'workers-ai'});
+  await providers.getByRole('button', {name:'OpenRouter'}).click();
+  await providers.getByRole('button', {name:'particle-1-free'}).click();
+  assert.deepEqual(await page.evaluate(() => window.__actions.at(-1)), {type:'selectProviderModel', model:'openrouter/particle-1-free'});
+  await page.evaluate(state => window.postMessage({type:'state',state},'*'), {...providerState,model:'openrouter/particle-1-free'});
+  await page.locator('#model img[data-brand="openrouter"]').waitFor();
+  assert.equal(await providers.getByRole('button', {name:/particle-1-free/}).getAttribute('aria-pressed'), 'true');
+  await page.keyboard.press('Escape');
+  assert.equal(await providers.isHidden(), true);
+  assert.equal(await page.locator('#model').evaluate(node => node === document.activeElement), true);
+  assertions.push('The narrow provider picker renders bundled brand marks, routes token setup, and confirms selection.');
 
   assert.deepEqual(errors,[]);
   await writeFile('test-results/ui-smoke.json',JSON.stringify({checkedAt:new Date().toISOString(),fixture:'Exact extension renderer with a VS Code message fixture; not a native editor or live model run.',assertions,errors},null,2));

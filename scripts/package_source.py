@@ -6,6 +6,7 @@ root=Path(__file__).resolve().parents[1]
 root_files={'package.json','package-lock.json','tsconfig.json','.gitignore','.gitattributes','.vscodeignore','.editorconfig','README.md','LICENSE','REUSE.md','THIRD_PARTY_NOTICES.md','CONTRIBUTING.md','Start Little Forge.cmd'}
 source_dirs={'src','tests','scripts','resources','docs','trueforge','evaluation','submission','.vscode','.github'}
 excluded={'node_modules','dist','output','tmp','test-results','.trueforge','.git','workspaces','__pycache__','.venv'}
+private_paths={root/'.vscode'/'settings.json'}
 private_name=re.compile(r'^(?:\.env.*|credentials?(?:[._-].*)?|secrets?(?:[._-].*)?)$|\.(?:sqlite|db)(?:-|$)|\.(?:pem|key|p12|pfx)$',re.I)
 files=[]
 for name in sorted(root_files):
@@ -18,7 +19,7 @@ for top in sorted(source_dirs):
         dirs[:]=sorted(d for d in dirs if d not in excluded and not (Path(current)/d).is_symlink() and not getattr(Path(current)/d,'is_junction',lambda:False)())
         for name in sorted(names):
             p=Path(current)/name
-            if private_name.search(name) or name.endswith(('.vsix','.zip','.pyc')): continue
+            if p in private_paths or private_name.search(name) or name.endswith(('.vsix','.zip','.pyc')): continue
             if p.is_symlink() or getattr(p,'is_junction',lambda:False)() or p.stat().st_nlink!=1: raise RuntimeError('Linked source entry cannot enter a release: '+str(p.relative_to(root)))
             files.append(p)
 for p in files:
@@ -26,7 +27,8 @@ for p in files:
     if p.stat().st_size>4*1024*1024: raise RuntimeError('Unexpected oversized release source: '+str(p.relative_to(root)))
 out=root/'output/release'
 out.mkdir(parents=True,exist_ok=True)
-target=out/'little-forge-source-0.1.0.zip'
+version=json.loads((root/'package.json').read_text(encoding='utf-8'))['version']
+target=out/f'little-forge-source-{version}.zip'
 entries=[]
 with zipfile.ZipFile(target,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=9) as z:
     for p in sorted(files,key=lambda p:p.relative_to(root).as_posix()):

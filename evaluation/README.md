@@ -1,6 +1,6 @@
 # Fixed-task acceptance guide
 
-These are future implementation acceptance steps. This guide does not mean Flask was cloned, dependencies installed, model inference performed or the fixed tasks passed. The exact prompts are stored in [tasks.json](tasks.json); do not paraphrase them in the recording. The pinned source is [Flask 3.1.3](https://github.com/pallets/flask/releases/tag/3.1.3), commit `22d924701a6ae2e4cd01e9a15bbaf3946094af65`.
+This guide describes how to reproduce the fixed tasks. See [live acceptance notes](../docs/LIVE_TEST_STATUS.md) for observed results. Use the exact prompts in [tasks.json](tasks.json) in the recording. The pinned source is [Flask 3.1.3](https://github.com/pallets/flask/releases/tag/3.1.3), commit `22d924701a6ae2e4cd01e9a15bbaf3946094af65`.
 
 ## Prepare isolated evaluation workspaces
 

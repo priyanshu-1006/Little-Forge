@@ -4,7 +4,7 @@ import path from 'node:path';
 await mkdir('dist', { recursive: true });
 const options = [
   { entryPoints: ['src/extension.ts'], bundle: true, platform: 'node', target: 'node22', format: 'cjs', outfile: 'dist/extension.cjs', external: ['vscode'], sourcemap: true, logLevel: 'info', legalComments: 'eof', define: { navigator: 'undefined' }, metafile: true },
-  { entryPoints: ['src/ui.js', 'src/ui.css'], bundle: true, platform: 'browser', target: 'es2022', format: 'iife', outdir: 'dist', logLevel: 'info', legalComments: 'eof', metafile: true }
+  { entryPoints: ['src/ui.js', 'src/ui.css'], bundle: true, platform: 'browser', target: 'es2022', format: 'iife', outdir: 'dist', loader: { '.svg': 'dataurl' }, logLevel: 'info', legalComments: 'eof', metafile: true }
 ];
 if (process.argv.includes('--watch')) {
   const contexts = await Promise.all(options.map(config => context(config)));

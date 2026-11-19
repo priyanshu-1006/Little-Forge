@@ -1,7 +1,7 @@
 {
   "teamName": "Optimistic Mutant Coders",
   "teamId": "TM-648F0A5BF41",
-  "dateIST": "31 October 2026",
+  "dateIST": "19 November 2026",
   "members": [
     {"name":"Priyanshu Chaurasia","role":"Leader","institution":"","github":"priyanshu-1006"},
     {"name":"Ayush Singh","role":"Member","institution":"","github":""},
@@ -9,13 +9,13 @@
     {"name":"Amitesh Vishwakarma","role":"Member","institution":"","github":""},
     {"name":"Alish Kaushambi","role":"Member","institution":"","github":""}
   ],
-  "localTests": 108,
+  "localTests": 122,
   "nativeC": "Native C rehearsal showed the exact inline request, two bounded connection-refused retries, a clear visible error and editor navigation after failure. All 235 tracked files (1,928,825 bytes) retained identical hashes; Git stayed clean and TrueForge healthy. Physical shortcut and interaction during backoff were not measured. Final video remains pending.",
   "videoUrl": "Not recorded",
   "repositoryUrl": "https://github.com/priyanshu-1006/Little-Forge",
   "scorecard": [
     {"criterion":"A1 Inline edit","max":10,"timestamp":"Not recorded","claim":"Native A review/apply passed 42/42 checks and 35 helper tests; video pending."},
-    {"criterion":"A2 Agent mode","max":10,"timestamp":"Not recorded","claim":"Live B completed and verified three-file patch (cli.py, test_cli.py, docs/cli.rst); CLI tests and help pass; footage pending."},
+    {"criterion":"A2 Agent mode","max":10,"timestamp":"Not recorded","claim":"Live B applied four approved files. All 37 acceptance checks and 59 Flask CLI tests passed."},
     {"criterion":"A3 Streaming/cancellation","max":10,"timestamp":"Not recorded","claim":"Streaming and cancellation pass harness fixtures; native footage pending."},
     {"criterion":"B1 Context assembly","max":15,"timestamp":"Not recorded","claim":"Unhinted Flask retrieval selected source, tests and docs within budget."},
     {"criterion":"B2 Diff safety","max":10,"timestamp":"Not recorded","claim":"Native hunk accept/reject preview, apply and undo; all 235 hashes restored."},

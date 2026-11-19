@@ -8,6 +8,12 @@ import powershell from 'highlight.js/lib/languages/powershell';
 import python from 'highlight.js/lib/languages/python';
 import typescript from 'highlight.js/lib/languages/typescript';
 import xml from 'highlight.js/lib/languages/xml';
+import geminiLogo from '../resources/providers/gemini.svg';
+import groqLogo from '../resources/providers/groq.svg';
+import openRouterLogo from '../resources/providers/openrouter.svg';
+import workersAiLogo from '../resources/providers/workers-ai.svg';
+import cohereLogo from '../resources/providers/cohere.svg';
+import vercelLogo from '../resources/providers/vercel.svg';
 
 for (const [name, language] of Object.entries({ bash, diff, javascript, json, powershell, python, typescript, xml })) highlighter.registerLanguage(name, language);
 
@@ -634,14 +640,16 @@ function renderReview() {
     const head = element('div', 'review-header');
     const status = { pending: 'Staged', applied: 'Applied', rejected: 'Rejected', expired: 'Expired' }[proposal.state];
     head.append(element('strong', '', 'Review changes'), element('small', `outcome-${proposal.state}`, `${proposal.files.length} ${proposal.files.length === 1 ? 'file' : 'files'} · ${status}`));
-    const dismissBtn = button('', 'card-dismiss-btn', () => {
+    const dismissReview = () => {
       dismissedProposals.add(proposal.id);
-      send('dismissProposal', { proposalId: proposal.id });
       section.remove();
-    });
-    dismissBtn.title = 'Dismiss review';
-    dismissBtn.innerHTML = SVG_ICONS.close;
-    head.append(dismissBtn);
+    };
+    if (proposal.state !== 'pending') {
+      const dismissBtn = button('', 'card-dismiss-btn', dismissReview);
+      dismissBtn.title = 'Dismiss review';
+      dismissBtn.innerHTML = SVG_ICONS.close;
+      head.append(dismissBtn);
+    }
     section.append(head, element('p', 'review-progress', `${counts.accept} accepted · ${counts.reject} rejected · ${counts.pending} pending`));
     const layout = element('div', 'review-actions');
     if (proposal.state === 'pending') {
@@ -703,13 +711,9 @@ function renderReview() {
       const resolvedMsg = element('div', `review-resolved-msg ${proposal.state}`);
       resolvedMsg.innerHTML = proposal.state === 'applied'
         ? `<span class="icon-inline">${SVG_ICONS.check}</span> Changes applied to workspace`
-        : `<span class="icon-inline">${SVG_ICONS.close}</span> Proposed changes rejected`;
+        : `<span class="icon-inline">${SVG_ICONS.close}</span> ${proposal.state === 'expired' ? 'Review expired' : 'Proposed changes rejected'}`;
 
-      const dismissActionBtn = button('Dismiss', 'review-dismiss-action', () => {
-        dismissedProposals.add(proposal.id);
-        send('dismissProposal', { proposalId: proposal.id });
-        section.remove();
-      });
+      const dismissActionBtn = button('Dismiss', 'review-dismiss-action', dismissReview);
       dismissActionBtn.title = 'Dismiss review';
       resolvedRow.append(resolvedMsg, dismissActionBtn);
       footer.append(resolvedRow);
@@ -1051,6 +1055,14 @@ function render() {
   $('command-list').replaceChildren(...activeApprovals.map(a => {
     const card = element('div', 'command-card');
     const decision = approvalDecisions.get(a.toolCallId);
+    const dismiss = () => {
+      if (!approvalDecisions.has(a.toolCallId)) {
+        approvalDecisions.set(a.toolCallId, 'denied');
+        send('commandDecision', { toolCallId: a.toolCallId, allow: false });
+      }
+      dismissedApprovals.add(a.toolCallId);
+      card.remove();
+    };
 
     // Header
     const header = element('div', 'command-card-header');
@@ -1065,16 +1077,8 @@ function render() {
     headerLeft.append(termIcon, element('span', 'command-card-title', 'Terminal Command Request'), badgeTag);
 
     // Cross / dismiss button
-    const crossBtn = button('', 'card-dismiss-btn', () => {
-      dismissedApprovals.add(a.toolCallId);
-      if (!decision) {
-        approvalDecisions.set(a.toolCallId, 'denied');
-        send('commandDecision', { toolCallId: a.toolCallId, allow: false });
-      }
-      send('dismissApproval', { toolCallId: a.toolCallId });
-      card.remove();
-    });
-    crossBtn.title = 'Dismiss / Cancel request';
+    const crossBtn = button('', 'card-dismiss-btn', dismiss);
+    crossBtn.title = decision ? 'Dismiss request' : 'Deny and dismiss request';
     crossBtn.innerHTML = SVG_ICONS.close;
     header.append(headerLeft, crossBtn);
     card.append(header);
@@ -1114,6 +1118,7 @@ function render() {
     // Actions
     const actions = element('div', 'command-actions');
     function showResolvedActions(status) {
+      crossBtn.title = 'Dismiss request';
       actions.replaceChildren();
       const statusRow = element('div', 'command-status-row');
       const statusMsg = element('div', `command-status-msg ${status}`);
@@ -1121,11 +1126,7 @@ function render() {
         ? `<span class="icon-inline">${SVG_ICONS.check}</span> Command allowed`
         : `<span class="icon-inline">${SVG_ICONS.close}</span> Command denied`;
 
-      const dismissAction = button('Dismiss', 'review-dismiss-action', () => {
-        dismissedApprovals.add(a.toolCallId);
-        send('dismissApproval', { toolCallId: a.toolCallId });
-        card.remove();
-      });
+      const dismissAction = button('Dismiss', 'review-dismiss-action', dismiss);
       dismissAction.title = 'Dismiss';
       statusRow.append(statusMsg, dismissAction);
       actions.append(statusRow);
@@ -1164,6 +1165,7 @@ function render() {
 
   // Render drawers & panels
   renderHistoryItems();
+  renderProviders();
   renderSignals(state);
   renderMemory(state);
   renderContract(state);
@@ -1414,7 +1416,7 @@ function createImpactRadarCard(res, isStandalone = false) {
   icon.innerHTML = SVG_ICONS.zap;
   title.append(icon, document.createTextNode(' Impact Radar · '), element('code', '', res.targetFile));
   const badge = element('span', `impact-badge ${res.riskLevel}`, `${res.riskLevel.toUpperCase()} RISK`);
-  
+
   if (isStandalone) {
     const hdrRight = element('div', 'impact-hdr-right');
     hdrRight.style.display = 'flex';
@@ -1649,6 +1651,96 @@ const permBtn = $('permissions-btn');
 const permMenu = $('permissions-menu');
 const historyBtn = $('history-btn');
 const historyDrawer = $('history-drawer');
+const providerDrawer = $('provider-drawer');
+const providerTrigger = $('model');
+const modelIcon = $('model-provider-icon');
+const defaultModelIcon = modelIcon.firstElementChild.cloneNode(true);
+const providerLogos = { gemini: geminiLogo, groq: groqLogo, openrouter: openRouterLogo, 'workers-ai': workersAiLogo, cohere: cohereLogo, vercel: vercelLogo };
+let activeProvider;
+let shownProviderLogo;
+let providerSignature;
+
+function providerLogo(id) {
+  if (!Object.hasOwn(providerLogos, id)) return element('span', 'provider-monogram', id === 'custom' ? '↗' : id[0].toUpperCase());
+  const image = element('img', 'provider-logo');
+  image.src = providerLogos[id];
+  image.alt = '';
+  image.dataset.brand = id;
+  return image;
+}
+
+function renderProviders() {
+  const groups = state.providers ?? [];
+  const selected = groups.find(group => group.models.some(model => model.name === state.model));
+  if (shownProviderLogo !== selected?.id) {
+    shownProviderLogo = selected?.id;
+    modelIcon.replaceChildren(selected ? providerLogo(selected.id) : defaultModelIcon.cloneNode(true));
+  }
+  if (providerDrawer.hidden) return;
+  const search = $('provider-search');
+  const group = groups.find(item => item.id === activeProvider) ?? selected ?? groups[0];
+  const busy = isRunning() || !!state.auxiliary || !!state.providerBusy;
+  const signature = JSON.stringify([groups, group?.id, state.model, state.connected, state.providerError, busy, search.value]);
+  if (signature === providerSignature) return;
+  providerSignature = signature;
+  const options = $('provider-options');
+  const modelList = $('provider-models');
+  const focused = document.activeElement.dataset.providerFocus;
+  options.replaceChildren(...groups.map(item => {
+    const choice = button('', 'provider-option', () => {
+      activeProvider = item.id;
+      search.value = '';
+      renderProviders();
+    });
+    choice.append(providerLogo(item.id), element('span', '', item.label));
+    choice.setAttribute('aria-pressed', String(item.id === group?.id));
+    choice.dataset.providerFocus = item.id;
+    return choice;
+  }));
+  $('provider-detail').hidden = !group;
+  $('provider-feedback').textContent = state.providerError || (state.providerBusy ? 'Saving provider in TrueForge…' : state.connected ? '' : 'Start TrueForge with npm run harness, then refresh.');
+  $('provider-refresh').disabled = !!state.providerBusy;
+  if (!group) return;
+  $('provider-name').textContent = group.label;
+  $('provider-note').textContent = group.note;
+  $('provider-status').textContent = group.models.length ? 'Configured' : group.needsToken ? 'API token needed' : 'Setup needed';
+  $('provider-status').dataset.configured = String(!!group.models.length);
+  search.hidden = group.models.length < 4;
+  const query = search.hidden ? '' : search.value.trim().toLowerCase();
+  const models = group.models.filter(model => model.label.toLowerCase().includes(query));
+  modelList.replaceChildren(...models.map(model => {
+    const current = state.model === model.name;
+    const choice = button(model.label, 'provider-model', () => send('selectProviderModel', { model: model.name }), busy || !state.connected);
+    choice.title = model.name;
+    choice.dataset.providerFocus = model.name;
+    choice.setAttribute('aria-pressed', String(current));
+    if (current) choice.append(element('span', 'provider-current', 'Selected'));
+    return choice;
+  }));
+  if (group.models.length && !models.length) modelList.append(element('p', '', 'No matching models.'));
+  if (!group.models.length && group.presets?.length) {
+    const presets = element('ul', 'provider-presets');
+    presets.setAttribute('aria-label', 'Models added during setup');
+    presets.append(...group.presets.map(name => element('li', '', name)));
+    modelList.append(presets);
+  }
+  const configure = $('provider-configure');
+  const manage = group.models.length || group.id === 'custom' || group.id === 'gemini';
+  configure.textContent = manage ? 'Manage in TrueForge ↗' : group.needsToken ? 'Add API token' : 'Connect provider';
+  configure.disabled = busy || !state.connected;
+  configure.onclick = () => send(manage ? 'providerSettings' : 'configureProvider', manage ? {} : { provider: group.id });
+  if (focused) [...options.children, ...modelList.children].find(node => node.dataset.providerFocus === focused)?.focus({ preventScroll: true });
+}
+
+function openProviders() {
+  activeProvider = (state.providers ?? []).find(group => group.models.some(model => model.name === state.model))?.id;
+  $('provider-search').value = '';
+  providerSignature = undefined;
+  openDrawer(providerDrawer);
+  renderProviders();
+  $('providers-close').focus();
+  send('refreshProviders');
+}
 const signalsBtn = $('signals-btn');
 const signalsDrawer = $('signals-drawer');
 const memoryBtn = $('memory-btn');
@@ -1865,6 +1957,8 @@ function selectMentionOption(kind) {
 function closeAllDrawers() {
   if (permMenu) permMenu.hidden = true;
   if (historyDrawer) historyDrawer.hidden = true;
+  providerDrawer.hidden = true;
+  providerTrigger.setAttribute('aria-expanded', 'false');
   if (signalsDrawer) signalsDrawer.hidden = true;
   if (memoryDrawer) memoryDrawer.hidden = true;
   if (contractDrawer) contractDrawer.hidden = true;
@@ -1897,6 +1991,8 @@ function openDrawer(drawer) {
     contractBtn?.setAttribute('aria-selected', 'true');
   } else if (drawer === historyDrawer) {
     historyBtn?.classList.add('active');
+  } else if (drawer === providerDrawer) {
+    providerTrigger.setAttribute('aria-expanded', 'true');
   } else if (drawer === toolsSidebar) {
     toolsToggleBtn?.classList.add('active');
   }
@@ -2069,9 +2165,11 @@ document.addEventListener('click', e => {
 
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
+    const providersOpen = !providerDrawer.hidden;
     closeAllDrawers();
     hideSlashMenu();
     hideMentionMenu();
+    if (providersOpen) { e.preventDefault(); providerTrigger.focus(); }
   }
 });
 
@@ -2091,8 +2189,12 @@ document.addEventListener('keydown', event => {
   } else return;
   event.preventDefault();
 });
-$('model').addEventListener('click', () => send('setup'));
-$('connect').addEventListener('click', () => send('setup'));
+providerTrigger.addEventListener('click', () => { if (providerDrawer.hidden) openProviders(); else closeAllDrawers(); });
+$('connect').addEventListener('click', openProviders);
+$('providers-close').addEventListener('click', () => { closeAllDrawers(); providerTrigger.focus(); });
+$('provider-refresh').addEventListener('click', () => send('refreshProviders'));
+$('provider-settings').addEventListener('click', () => send('providerSettings'));
+$('provider-search').addEventListener('input', renderProviders);
 $('session').addEventListener('click', () => send('session'));
 const sessionBtnEl = $('session-btn');
 if (sessionBtnEl) {
@@ -2135,6 +2237,8 @@ window.addEventListener('message', event => {
   if (event.data.type === 'state') {
     state = event.data.state;
     render();
+  } else if (event.data.type === 'openProviders') {
+    openProviders();
   } else if (event.data.type === 'insertMention') {
     $('prompt').value += `${$('prompt').value ? ' ' : ''}${event.data.text} `;
     refreshComposer();

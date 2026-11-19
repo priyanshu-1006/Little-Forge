@@ -4,7 +4,7 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { Workspace } from '../src/core/workspace.js';
-import { ContextEngine } from '../src/core/context.js';
+import { ContextEngine, retryContextOnChange } from '../src/core/context.js';
 
 async function fixture(t: TestContext) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'little-forge-context-events-'));
@@ -60,6 +60,25 @@ test('permitted source creation and deletion invalidate cached symbol inventory'
   await fs.unlink(f.absolute('src/created.py'));
   assert.equal(await f.context.handleFileEvent(f.absolute('src/created.py')), true);
   assert.deepEqual((await f.context.symbols()).map(symbol => symbol.name), ['existing']);
+});
+
+test('run context retries a transient invalidation and returns the new source', async t => {
+  const f = await fixture(t);
+  await f.write('src/app.py', 'def old_name():\n    return 1\n');
+  const read = f.workspace.read.bind(f.workspace);
+  let changed = false;
+  f.workspace.read = async (file, signal) => {
+    const snapshot = await read(file, signal);
+    if (file === 'src/app.py' && !changed) {
+      changed = true;
+      await f.write(file, 'def new_function_name():\n    return 2\n');
+      await f.context.handleFileEvent(f.absolute(file));
+    }
+    return snapshot;
+  };
+  const context = await retryContextOnChange(() => f.context.retrieve('new function name', 6000));
+  assert.match(context.chunks[0].content, /def new_function_name/);
+  assert.doesNotMatch(context.chunks[0].content, /def old_name/);
 });
 
 test('new nested ignore policies invalidate a running scan and remove now-excluded symbols', async t => {

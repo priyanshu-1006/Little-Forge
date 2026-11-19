@@ -7,7 +7,7 @@ import { verificationPlan } from './core/verification.js';
 import type { CommandInput } from './core/commands.js';
 import { createTwoFilesPatch } from 'diff';
 import { isSensitivePath, Workspace } from './core/workspace.js';
-import { ContextEngine, parseMentions } from './core/context.js';
+import { ContextEngine, parseMentions, retryContextOnChange } from './core/context.js';
 import { ProposalManager } from './core/proposals.js';
 import { cancelled, hash, type ContextResult, type ForgeEvent, type Mention, type Proposal, type SelectionScope } from './core/types.js';
 import { ForgeClient, ForgeError, recoveryFailure, type AgentMode, type ApprovalRequest } from './trueforge.js';
@@ -15,6 +15,7 @@ import { startEditorServer } from './mcp-server.js';
 import { EditorTools } from './tools.js';
 import { MAX_RETRY_DELAY_MS, quotaContinuationInput, recoveryAction, waitForRetry } from './core/resilience.js';
 import { analyzeImpact, type ImpactResult } from './core/impact.js';
+import { providerGroups, providerPresets, workersAiAccount, workersAiEndpoint, type ProviderGroup } from './core/providers.js';
 
 type Status = 'idle' | 'connecting' | 'running' | 'awaiting-review' | 'cancelling' | 'cancelled' | 'completed' | 'failed';
 export type PermissionMode = 'review' | 'default' | 'auto' | 'turbo';
@@ -39,6 +40,7 @@ interface ContextChoices { pins: string[]; excluded: string[]; semantic: boolean
 interface RunOptions { workflow: Workflow; context: ContextChoices; limits: RunEvidence['limits']; repro?: boolean }
 interface UiState {
   status: Status; connected: boolean; model: string; permissionMode: PermissionMode; sessionId?: string;
+  providers: ProviderGroup[]; providerBusy?: boolean; providerError?: string;
   messages: Message[]; activity: string[]; context?: ContextResult; draftContext?: ContextResult;
   proposals: Proposal[]; approvals: ApprovalRequest[]; checkpoints: Array<{id:string;paths:string[];state:string}>;
   error?: string; evidence?: RunEvidence; retry?: { until: number; message: string };
@@ -107,6 +109,7 @@ class ForgeExtension implements vscode.WebviewViewProvider, vscode.Disposable {
     status: 'idle',
     connected: false,
     model: '',
+    providers: providerGroups([], []),
     permissionMode: 'review',
     messages: [],
     activity: [],
@@ -143,6 +146,8 @@ class ForgeExtension implements vscode.WebviewViewProvider, vscode.Disposable {
   private sessionMode?: string;
   private publishTimer?: ReturnType<typeof setTimeout>;
   private disposed = false;
+  private webviewReady = false;
+  private showProvidersOnReady = false;
   private readonly virtualChanges = new vscode.EventEmitter<vscode.Uri>();
 
   constructor(private readonly extension: vscode.ExtensionContext) {
@@ -230,11 +235,27 @@ class ForgeExtension implements vscode.WebviewViewProvider, vscode.Disposable {
 
   resolveWebviewView(view: vscode.WebviewView) {
     this.view = view;
+    this.webviewReady = false;
     view.webview.options = { enableScripts: true, localResourceRoots: [vscode.Uri.joinPath(this.extension.extensionUri, 'dist')] };
     const uri = (name: string) => view.webview.asWebviewUri(vscode.Uri.joinPath(this.extension.extensionUri, 'dist', name));
     const nonce = randomUUID().replaceAll('-', '');
-    view.webview.html = `<!doctype html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${view.webview.cspSource}; script-src 'nonce-${nonce}';"><link rel="stylesheet" href="${uri('ui.css')}"></head><body>
-        <header><div class="brand"><div class="brand-left"><span class="logo">ϟ</span><span class="brand-name">LITTLE FORGE</span><span class="version-badge">2.0</span></div><div class="brand-right"><span class="status"><i id="dot" class="dot"></i><span id="connection">Local harness</span></span><button id="tools-toggle-btn" class="header-tools-btn" type="button" title="Tools & Diagnostics (Signals, Memory, Guard, Session)"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg> <span class="tools-btn-label">Tools</span><span id="tools-badge" class="tab-badge" hidden>0</span></button></div></div><div class="header-controls-row"><button id="model" class="pill model-pill" title="Choose model"><span class="btn-icon"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><circle cx="19" cy="5" r="2"/><circle cx="5" cy="19" r="2"/><line x1="12" x2="19" y1="12" y2="5"/><line x1="12" x2="5" y1="12" y2="19"/></svg></span><span id="model-label">Choose model</span> <span class="dropdown-arrow">▾</span></button><button id="permissions-btn" class="pill perm-pill" title="Local Permissions"><span id="perm-icon"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></span> <span id="perm-label">Review</span> ▾</button><div class="chat-controls-group"><button id="history-btn" class="pill chat-pill" title="Conversation History"><span id="history-icon"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></span> <span id="history-label">Chats</span> ▾</button><button id="new-chat" class="pill icon-only new-chat-pill" title="New chat"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" x2="12" y1="5" y2="19"/><line x1="5" x2="19" y1="12" y2="12"/></svg></button></div><button id="connect" class="pill" title="Connect and configure" hidden>Connect ↗</button></div><div id="permissions-menu" class="permissions-dropdown" hidden><div class="perm-title">Local Permissions</div><button type="button" class="perm-option" data-mode="review"><span class="perm-option-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg></span><div class="perm-option-info"><div class="perm-option-name">Request Review</div><div class="perm-option-desc">Every command and file change requires approval.</div></div><span class="perm-check"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></span></button><button type="button" class="perm-option" data-mode="default"><span class="perm-option-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg></span><div class="perm-option-info"><div class="perm-option-name">Default</div><div class="perm-option-desc">Review source changes and commands.</div></div><span class="perm-check"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></span></button><button type="button" class="perm-option" data-mode="auto"><span class="perm-option-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></span><div class="perm-option-info"><div class="perm-option-name">Auto</div><div class="perm-option-desc">Automatically approve supported checks when allowed by the Task Contract.</div></div><span class="perm-check"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></span></button><button type="button" class="perm-option" data-mode="turbo"><span class="perm-option-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg></span><div class="perm-option-info"><div class="perm-option-name">Turbo</div><div class="perm-option-desc">Allow dependency staging where the Task Contract permits it. All source writes require review.</div></div><span class="perm-check"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></span></button></div></header>
+    view.webview.html = `<!doctype html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${view.webview.cspSource}; img-src data:; script-src 'nonce-${nonce}';"><link rel="stylesheet" href="${uri('ui.css')}"></head><body>
+        <header><div class="brand"><div class="brand-left"><span class="logo">ϟ</span><span class="brand-name">LITTLE FORGE</span><span class="version-badge">2.0</span></div><div class="brand-right"><span class="status"><i id="dot" class="dot"></i><span id="connection">Local harness</span></span><button id="tools-toggle-btn" class="header-tools-btn" type="button" title="Tools & Diagnostics (Signals, Memory, Guard, Session)"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg> <span class="tools-btn-label">Tools</span><span id="tools-badge" class="tab-badge" hidden>0</span></button></div></div><div class="header-controls-row"><button id="model" class="pill model-pill" title="Choose model" aria-controls="provider-drawer" aria-expanded="false"><span id="model-provider-icon" class="btn-icon"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><circle cx="19" cy="5" r="2"/><circle cx="5" cy="19" r="2"/><line x1="12" x2="19" y1="12" y2="5"/><line x1="12" x2="5" y1="12" y2="19"/></svg></span><span id="model-label">Choose model</span> <span class="dropdown-arrow">▾</span></button><button id="permissions-btn" class="pill perm-pill" title="Local Permissions"><span id="perm-icon"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></span> <span id="perm-label">Review</span> ▾</button><div class="chat-controls-group"><button id="history-btn" class="pill chat-pill" title="Conversation History"><span id="history-icon"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></span> <span id="history-label">Chats</span> ▾</button><button id="new-chat" class="pill icon-only new-chat-pill" title="New chat"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" x2="12" y1="5" y2="19"/><line x1="5" x2="19" y1="12" y2="12"/></svg></button></div><button id="connect" class="pill" title="Connect and configure" hidden>Connect ↗</button></div><div id="permissions-menu" class="permissions-dropdown" hidden><div class="perm-title">Local Permissions</div><button type="button" class="perm-option" data-mode="review"><span class="perm-option-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg></span><div class="perm-option-info"><div class="perm-option-name">Request Review</div><div class="perm-option-desc">Every command and file change requires approval.</div></div><span class="perm-check"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></span></button><button type="button" class="perm-option" data-mode="default"><span class="perm-option-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg></span><div class="perm-option-info"><div class="perm-option-name">Default</div><div class="perm-option-desc">Review source changes and commands.</div></div><span class="perm-check"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></span></button><button type="button" class="perm-option" data-mode="auto"><span class="perm-option-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></span><div class="perm-option-info"><div class="perm-option-name">Auto</div><div class="perm-option-desc">Automatically approve supported checks when allowed by the Task Contract.</div></div><span class="perm-check"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></span></button><button type="button" class="perm-option" data-mode="turbo"><span class="perm-option-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg></span><div class="perm-option-info"><div class="perm-option-name">Turbo</div><div class="perm-option-desc">Allow dependency staging where the Task Contract permits it. All source writes require review.</div></div><span class="perm-check"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></span></button></div></header>
+      <aside id="provider-drawer" class="history-drawer provider-drawer" aria-labelledby="provider-title" hidden>
+        <div class="history-drawer-header"><strong id="provider-title" class="history-drawer-title">Providers &amp; models</strong><button type="button" id="providers-close" class="history-close-btn" aria-label="Close providers">×</button></div>
+        <div class="provider-body">
+          <div id="provider-options" class="provider-options" role="group" aria-label="Providers"></div>
+          <section id="provider-detail" aria-labelledby="provider-name">
+            <div class="provider-detail-heading"><h2 id="provider-name"></h2><span id="provider-status" class="provider-status"></span></div>
+            <p id="provider-note"></p>
+            <input id="provider-search" class="history-search-input" type="search" aria-label="Filter models" placeholder="Filter models">
+            <div id="provider-models" class="provider-models"></div>
+            <button type="button" id="provider-configure" class="small-button">Configure</button>
+          </section>
+          <p id="provider-feedback" role="status" aria-live="polite"></p>
+        </div>
+        <div class="provider-footer"><button type="button" id="provider-refresh" class="small-button">Refresh models</button><button type="button" id="provider-settings" class="small-button">TrueForge settings ↗</button></div>
+      </aside>
       <aside id="tools-sidebar" class="history-drawer" hidden><div class="history-drawer-header"><span class="history-drawer-title"><span class="btn-icon"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg></span> Tools & Diagnostics</span><button type="button" id="tools-close" class="history-close-btn" title="Close drawer"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" x2="6" y1="6" y2="18"/><line x1="6" x2="18" y1="6" y2="18"/></svg></button></div><div class="tools-sidebar-list"><button id="signals-btn" type="button" class="tools-sidebar-item" title="Workspace Signals & Diagnostics"><div class="tools-item-left"><span class="tools-item-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg></span><div class="tools-item-info"><div class="tools-item-title-row"><span id="signals-label" class="tools-item-name">Signals</span><span id="signals-badge" class="tab-badge" hidden>0</span></div><div class="tools-item-desc">Live workspace diagnostics & compiler status</div></div></div><span class="tools-item-arrow">→</span></button><button id="memory-btn" type="button" class="tools-sidebar-item" title="Forge Memory (Architectural Rules)"><div class="tools-item-left"><span class="tools-item-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96.44 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 4.44-2.04z"/><path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96.44 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24 2.5 2.5 0 0 0-4.44-2.04z"/></svg></span><div class="tools-item-info"><div class="tools-item-title-row"><span id="memory-label" class="tools-item-name">Memory</span><span id="memory-badge" class="tab-badge" hidden>0</span></div><div class="tools-item-desc">Architectural constraints & learned project rules</div></div></div><span class="tools-item-arrow">→</span></button><button id="contract-btn" type="button" class="tools-sidebar-item" title="Task Contract (Change Guard)"><div class="tools-item-left"><span class="tools-item-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></span><div class="tools-item-info"><div class="tools-item-title-row"><span id="contract-label" class="tools-item-name">Guard</span></div><div class="tools-item-desc">Safety boundary, file limits, and permissions</div></div></div><span class="tools-item-arrow">→</span></button><button id="session-btn" type="button" class="tools-sidebar-item" title="Open TrueForge session"><div class="tools-item-left"><span class="tools-item-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" x2="21" y1="14" y2="3"/></svg></span><div class="tools-item-info"><div class="tools-item-title-row"><span class="tools-item-name">Session ↗</span></div><div class="tools-item-desc">Open external session viewer in browser</div></div></div><span class="tools-item-arrow">↗</span></button><button id="isolated" type="button" class="tools-sidebar-item">Open isolated worktree</button><button id="demo-mode" type="button" class="tools-sidebar-item" aria-pressed="false">Demo mode</button></div></aside>
       <aside id="history-drawer" class="history-drawer" hidden><div class="history-drawer-header"><span class="history-drawer-title">Conversations</span><button type="button" id="drawer-new-chat" class="history-new-btn" title="Start new conversation"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" x2="12" y1="5" y2="19"/><line x1="5" x2="19" y1="12" y2="12"/></svg> New</button><button type="button" id="drawer-close" class="history-close-btn" title="Close drawer"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" x2="6" y1="6" y2="18"/><line x1="6" x2="18" y1="6" y2="18"/></svg></button></div><div class="history-search-bar"><input type="text" id="history-search" class="history-search-input" placeholder="Search conversations…" autocomplete="off" /></div><div class="history-filter-bar"><button type="button" class="history-filter-chip active" data-filter="all">All</button><button type="button" class="history-filter-chip" data-filter="today">Today</button><button type="button" class="history-filter-chip" data-filter="recent">Recent</button></div><div id="history-items" class="history-items"></div></aside>
       <aside id="signals-drawer" class="history-drawer" hidden><div class="history-drawer-header"><span class="history-drawer-title"><span class="btn-icon"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg></span> Workspace Signals</span><button type="button" id="signals-refresh-btn" class="history-new-btn"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/><path d="M3 21v-5h5"/></svg> Refresh</button><button type="button" id="signals-close" class="history-close-btn"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" x2="6" y1="6" y2="18"/><line x1="6" x2="18" y1="6" y2="18"/></svg></button></div><div id="signals-drawer-items" class="history-items"></div></aside>
@@ -266,6 +287,8 @@ class ForgeExtension implements vscode.WebviewViewProvider, vscode.Disposable {
     const str = (name: string, max = 2000) => { const v = message[name]; if (typeof v !== 'string' || v.length > max) throw new Error('Invalid editor action.'); return v; };
     switch (message.type) {
       case 'ready':
+        this.webviewReady = true;
+        this.maybeOpenProviderPicker();
         void this.checkConnection();
         this.publish(true);
         return;
@@ -294,7 +317,10 @@ class ForgeExtension implements vscode.WebviewViewProvider, vscode.Disposable {
         await vscode.window.showTextDocument(doc, { preview: true }); return;
       }
       case 'stop': await this.stop(); return;
-      case 'setup': await this.setup(); return;
+      case 'refreshProviders': await this.checkConnection(); return;
+      case 'selectProviderModel': await this.selectProviderModel(str('model', 256)); return;
+      case 'configureProvider': await this.configureProvider(str('provider', 32)); return;
+      case 'providerSettings': await this.openProviderSettings(); return;
       case 'session': {
         const baseUrl = this.config().get<string>('baseUrl', 'http://127.0.0.1:8790');
         const targetUrl = this.client && this.state.sessionId
@@ -397,21 +423,13 @@ class ForgeExtension implements vscode.WebviewViewProvider, vscode.Disposable {
       }
       case 'rejectRemaining': { const id = str('proposalId'); const proposal = this.assertCurrent(id); for (const file of proposal.files) for (const hunk of file.hunks) if (hunk.decision === 'pending') this.proposals!.decide(id, hunk.id, 'reject'); this.refreshProposal(id); return; }
       case 'apply': await this.applySelection(str('proposalId')); return;
-      case 'dismissProposal': {
-        const id = str('proposalId');
-        this.state.proposals = this.state.proposals.filter(p => p.id !== id);
-        this.publish(true);
-        return;
-      }
-      case 'commandDecision': { const id = str('toolCallId'); const approval = this.state.approvals.find(a => a.toolCallId === id && a.name === 'run_command'); if (!approval || !this.run) throw new Error('This command approval expired.'); this.run.decisions.set(id, message.allow === true); await this.maybeResume(); return; }
-      case 'dismissApproval': {
+      case 'commandDecision': {
         const id = str('toolCallId');
-        if (this.run && !this.run.decisions.has(id)) {
-          this.run.decisions.set(id, false);
-          void this.maybeResume();
-        }
-        this.state.approvals = this.state.approvals.filter(a => a.toolCallId !== id);
-        this.publish(true);
+        const approval = this.state.approvals.find(a => a.toolCallId === id && a.name === 'run_command');
+        if (!approval || !this.run) throw new Error('This command approval expired.');
+        if (this.run.decisions.has(id)) return;
+        this.run.decisions.set(id, message.allow === true);
+        await this.maybeResume();
         return;
       }
       case 'undo': await this.undo(str('id')); return;
@@ -721,7 +739,9 @@ MANDATORY PROTOCOL STEPS:
     if (this.busy()) throw new Error('Finish the current operation before previewing context.');
     await this.auxiliaryWork('Preparing context', async signal => {
       await this.initialise();
-      this.state.draftContext = await this.collectContext(prompt, this.contextBudget(this.config().get('contextTokens', 32768)), context, signal);
+      this.state.draftContext = await retryContextOnChange(
+        () => this.collectContext(prompt, this.contextBudget(this.config().get('contextTokens', 32768)), context, signal), signal,
+      );
     });
   }
   private async auxiliaryWork<T>(label: string, work: (signal: AbortSignal) => Promise<T>): Promise<T> {
@@ -756,27 +776,112 @@ MANDATORY PROTOCOL STEPS:
     return id;
   }
   async setup(internal = false) {
-    if (this.busy() && !internal) throw new Error('Stop the active run before changing the model connection.');
-    if (!internal) this.preparing = true;
-    try { await this.setupReserved(); } finally { if (!internal) this.preparing = false; this.publish(true); }
-  }
-  private async setupReserved() {
-    await this.initialise();
-    try {
-      const health = await this.client!.health(); this.state.connected = true;
-      if (!health.models.length) {
-        this.state.error = 'TrueForge is running. Add your chosen provider under Settings → Models, then choose Connect again. API keys stay in TrueForge.';
-        await vscode.env.openExternal(vscode.Uri.parse(this.client!.baseUrl)); this.publish(true); return;
-      }
-      const selected = await vscode.window.showQuickPick(health.models.map(m => ({ label: m.name })), { title: 'Little Forge · choose a configured TrueForge model', placeHolder: 'Provider credentials remain in TrueForge settings' });
-      if (selected) { await this.config().update('model', selected.label, vscode.ConfigurationTarget.Global); this.state.model = selected.label; this.state.sessionId = undefined; this.state.error = undefined; }
-    } catch (error) {
-      this.state.connected = false; this.state.error = `${this.safeError(error)}\nRun “npm run harness” in the little-forge folder, then open the local TrueForge page and configure your provider.`;
-      const action = await vscode.window.showInformationMessage('Start the local TrueForge harness, configure your provider, then reconnect.', 'Open local setup', 'Show output');
-      if (action === 'Open local setup') await vscode.env.openExternal(vscode.Uri.parse(this.client!.baseUrl));
-      if (action === 'Show output') this.output.show();
+    if (!internal) {
+      this.showProvidersOnReady = true;
+      await vscode.commands.executeCommand('littleForge.agent.focus');
+      this.maybeOpenProviderPicker();
+      return;
     }
+    await this.checkConnection();
+    const items = this.state.providers.flatMap(group => group.models.map(model => ({ label: model.name, description: group.label })));
+    if (!items.length) {
+      this.state.error = this.state.connected ? 'Open Providers & models and connect a provider before running.' : 'Start the local TrueForge harness before choosing a model.';
+      this.publish(true);
+      return;
+    }
+    const selected = await vscode.window.showQuickPick(items, { title: 'Little Forge · choose a configured model' });
+    if (selected) await this.saveModelSelection(selected.label);
+  }
+
+  private maybeOpenProviderPicker() {
+    if (!this.showProvidersOnReady || !this.webviewReady || !this.view) return;
+    this.showProvidersOnReady = false;
+    void this.view.webview.postMessage({ type: 'openProviders' });
+  }
+
+  private providerClient(): ForgeClient {
+    const client = new ForgeClient(this.config().get<string>('baseUrl', 'http://127.0.0.1:8790'));
+    return this.client?.baseUrl === client.baseUrl ? this.client : client;
+  }
+
+  private async openProviderSettings() {
+    await vscode.env.openExternal(vscode.Uri.parse(this.providerClient().baseUrl + '/settings'));
+  }
+
+  private async saveModelSelection(name: string) {
+    await this.config().update('model', name, vscode.ConfigurationTarget.Global);
+    if (this.state.model !== name) this.state.sessionId = undefined;
+    this.state.model = name;
+    this.state.error = undefined;
+    this.state.providerError = undefined;
     this.publish(true);
+  }
+
+  private async selectProviderModel(name: string) {
+    if (this.busy()) throw new Error('Finish the active run before switching models.');
+    this.preparing = true;
+    try {
+      await this.checkConnection();
+      if (!this.state.providers.some(group => group.models.some(model => model.name === name))) {
+        this.state.providerError = 'This model is unavailable. Refresh the list or check its provider in TrueForge.';
+        return;
+      }
+      await this.saveModelSelection(name);
+    } finally {
+      this.preparing = false;
+      this.publish(true);
+    }
+  }
+
+  private async configureProvider(id: string) {
+    const preset = providerPresets.find(provider => provider.id === id);
+    if (!preset) throw new Error('Unknown provider.');
+    if (!preset.models) { await this.openProviderSettings(); return; }
+    if (this.busy()) throw new Error('Finish the active run before configuring a provider.');
+    this.preparing = true;
+    this.state.providerBusy = true;
+    this.state.providerError = undefined;
+    this.publish(true);
+    try {
+      const client = this.providerClient();
+      const saved = await client.modelProviders();
+      const existing = saved.find(provider => provider.name === preset.id);
+      if (existing?.manifest.hasCredential) { await this.openProviderSettings(); return; }
+      let endpoint = preset.endpoint;
+      if (preset.id === 'workers-ai') {
+        const account = workersAiAccount(existing?.manifest.base_url) ?? await vscode.window.showInputBox({
+          title: 'Cloudflare Workers AI account ID', prompt: 'Copy the Account ID from Workers AI → Use REST API.',
+          ignoreFocusOut: true, validateInput: value => /^[a-f0-9]{32}$/i.test(value.trim()) ? undefined : 'Enter the 32-character account ID.',
+        });
+        if (!account) return;
+        endpoint = workersAiEndpoint(account.trim());
+      }
+      if (!endpoint || existing && (existing.manifest.type !== 'custom' || existing.manifest.base_url?.replace(/\/$/, '') !== endpoint)) {
+        this.state.providerError = 'A provider with this name already exists. Manage it in TrueForge settings.';
+        return;
+      }
+      const secret = await vscode.window.showInputBox({
+        title: `${preset.label} API token`, password: true, ignoreFocusOut: true,
+        prompt: 'Paste the token here. TrueForge stores the credential locally.',
+        validateInput: value => /^\S{1,4096}$/.test(value.trim()) ? undefined : 'Enter a single API token.',
+      });
+      if (!secret?.trim()) return;
+      if (existing) {
+        const current = (await client.modelProviders()).find(provider => provider.name === preset.id);
+        if (JSON.stringify(current?.manifest) !== JSON.stringify(existing.manifest)) throw new Error('Provider settings changed. Refresh before trying again.');
+      }
+      const models = existing?.manifest.models.length ? existing.manifest.models : preset.models;
+      await client.saveCustomProvider(preset.id, endpoint, models, secret.trim(), !!existing);
+      await this.checkConnection();
+      const first = `${preset.id}/${models[0].name}`;
+      if (this.state.providers.some(group => group.models.some(model => model.name === first))) await this.saveModelSelection(first);
+    } catch (error) {
+      this.state.providerError = this.safeError(error);
+    } finally {
+      this.preparing = false;
+      this.state.providerBusy = false;
+      this.publish(true);
+    }
   }
   async mention(kind: string) {
     await this.initialise();
@@ -968,6 +1073,11 @@ MANDATORY PROTOCOL STEPS:
     try {
       await this.client!.health(); this.state.connected = true;
       if (run.abort.signal.aborted) return;
+      const signal = run.abort.signal;
+      const selected = scope ? await this.context!.forSelection(scope, contextBudget, signal) : undefined;
+      const context = await retryContextOnChange(() => this.collectContext(prompt, contextBudget, options.context, signal, selected), signal);
+      if (signal.aborted || this.run !== run) return;
+      this.state.context = context;
       // A late call from an older harness session must never enter a newer run.
       // Each user request gets a new endpoint, bearer token and inline session binding.
       await this.bridge?.close();
@@ -981,9 +1091,6 @@ MANDATORY PROTOCOL STEPS:
       this.log(`Reasoning effort: ${run.reasoningEffort || 'provider default'}`);
       if (this.run !== run || run.abort.signal.aborted) { await this.client!.cancel(createdSession).catch(() => undefined); return; }
       this.state.sessionId = createdSession; this.sessionModel = selectedModel; this.sessionMode = run.mode;
-      const selected = scope ? await this.context!.forSelection(scope, contextBudget, run.abort.signal) : undefined;
-      const context = await this.collectContext(prompt, contextBudget, options.context, run.abort.signal, selected);
-      this.state.context = context;
       const selection = scope ? `\nINLINE SCOPE (immutable): ${JSON.stringify(scope)}\nSelected source:\n${selected!.chunks[0].content}\nDo not edit outside this scope.` : '';
       const recent = this.state.messages.slice(0, -2).slice(-4).map(m => `${m.role}: ${m.text.slice(0, 1000)}`).join('\n').slice(-3000);
       let guidance = 'Use read-only workspace evidence. Cite workspace-relative paths using Markdown links with #L line anchors.';
@@ -1452,14 +1559,13 @@ MANDATORY PROTOCOL STEPS:
   }
   private async checkConnection() {
     try {
-      if (!this.client) {
-        const baseUrl = this.config().get<string>('baseUrl', 'http://127.0.0.1:8790');
-        this.client = new ForgeClient(baseUrl);
-      }
-      await this.client.health();
+      const client = this.providerClient();
+      const [health, saved] = await Promise.all([client.health(), client.modelProviders().catch(() => [])]);
+      this.state.providers = providerGroups(health.models, saved);
       this.state.connected = true;
     } catch {
       this.state.connected = false;
+      this.state.providers = providerGroups([], []);
     }
     this.publish(true);
   }

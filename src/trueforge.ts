@@ -1,5 +1,6 @@
 import type { AgentBinding, ForgeEvent } from './core/types.js';
 import { MAX_RETRY_DELAY_MS } from './core/resilience.js';
+import type { ProviderModel, SavedProvider } from './core/providers.js';
 
 /** Official TrueForge HTTP wire API, verified against the 0.180.1 source.
  * https://github.com/truefoundry/trueforge/tree/%40truefoundry/trueforge%400.180.1/packages/trueforge/src/routes
@@ -301,6 +302,37 @@ export class ForgeClient {
     if (!Array.isArray(list.data)) throw new ForgeError('TrueForge returned an invalid model list.');
     const models = list.data.map(item => { const model = object(item); if (typeof model.name !== 'string') throw new ForgeError('TrueForge returned an invalid model.'); return { name: model.name }; });
     return { models, ...(typeof health.version === 'string' ? { version: health.version } : {}) };
+  }
+
+  async modelProviders(): Promise<SavedProvider[]> {
+    const response = await this.json('/api/v1/settings/model-providers');
+    if (!Array.isArray(response.data)) throw new ForgeError('TrueForge returned an invalid provider list.');
+    return response.data.map(entry => {
+      const provider = object(entry);
+      const manifest = object(provider.manifest);
+      if (typeof provider.name !== 'string' || typeof manifest.type !== 'string' || !Array.isArray(manifest.models)) {
+        throw new ForgeError('TrueForge returned an invalid provider configuration.');
+      }
+      return {
+        name: provider.name,
+        manifest: {
+          type: manifest.type,
+          base_url: typeof manifest.base_url === 'string' ? manifest.base_url : undefined,
+          hasCredential: !!manifest.auth,
+          models: manifest.models as ProviderModel[],
+        },
+      };
+    });
+  }
+
+  async saveCustomProvider(name: string, endpoint: string, models: ProviderModel[], apiKey?: string, completeDraft = false): Promise<void> {
+    await this.json('/api/v1/settings/model-providers', {
+      method: completeDraft ? 'PUT' : 'POST',
+      body: JSON.stringify({ manifest: {
+        type: 'custom', name, base_url: endpoint, models,
+        ...(apiKey ? { auth: { api_key: apiKey } } : {}),
+      } }),
+    });
   }
 
   async registerEditor(binding: AgentBinding): Promise<void> {

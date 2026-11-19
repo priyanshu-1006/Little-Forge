@@ -1,15 +1,15 @@
 # Live acceptance notes
 
-Updated 31 October 2026, IST. **The extension is built; complete competition acceptance is still pending.**
+Updated 19 November 2026, IST. **Task B passed live verification. Final competition footage and submission are pending.**
 
 ## Current state
 
 | Requirement | Observed result |
 | --- | --- |
-| Saved real provider | Google provider verified through TrueForge; seven model aliases listed. |
+| Saved real providers | Google, Workers AI and OpenRouter ran through local TrueForge. Particle-1 Free produced the verified Task B patch. |
 | Real model/editor tools | Streaming, searches and fresh file reads observed. |
 | Task A | Both live core and native review/apply passed 42 strict checks and 35 helper tests with Flash-Lite / medium reasoning. Native per-hunk accept/reject preview and checkpoint undo observed; 235 hashes restored. Separate core patch preserved. Physical shortcut and video remain pending. |
-| Task B | Relevant files were discovered, but no verified meaningful three-file patch was completed. |
+| Task B | OpenRouter Particle-1 Free discovered the target files, staged seven hunks and applied an approved four-file change. The independent verifier passed 37/37 checks and 59 Flask CLI tests. |
 | Task C failure consistency | Native exact inline request, two bounded refused-endpoint retries, visible error and editor navigation after failure; all 235 hashes unchanged, clean Git and healthy harness. Eight assertions passed. Physical shortcut/backoff interaction and final video remain pending. |
 | Native extension | Activation/commands/panel verified; full current workflow and final recording pending. |
 | Submission | Repository publication, four-minute video and final scorecard/write-up are not complete. |
@@ -32,16 +32,16 @@ A controlled comparison with **medium reasoning** then produced complete A docum
 
 The subsequent **native A rehearsal** repeated the exact instruction in VS Code, showed independent hunk decisions and their native diff preview, applied through TrueForge, and passed the same 42 checks / 35 tests. Native checkpoint undo restored all 235 baseline hashes and clean Git status. Receipt: `native-task-a-20261031/summary.json`, with actual captures and UI observations. This is a rehearsal, not the final four-minute recording, and the physical shortcut was not exercised.
 
-The subsequent medium-effort B trial still reached the 32-iteration bound while researching, without staging a patch. Receipt: `live-B-6592e47d-3413-4021-bd24-1e7ee5779efa/`. Further repetition with the same settings is not justified; the larger configured Flash models remain the next comparison when quota is usable.
+Earlier B trials reached the 32-iteration bound while researching. On 19 November, the successful OpenRouter run used the challenge wording with a short lead-in and no file hints. After repository discovery, the user approved changes to `src/flask/cli.py`, `tests/test_cli.py`, `docs/cli.rst`, and `docs/api.rst`; TrueForge applied them and emitted a checkpoint. A later 429 occurred after application. The independent verifier subsequently confirmed masked JSON, public values, configuration immutability, help with and without an application, and a passing full CLI suite. The approved patch remains in the ignored Flask evaluation checkout.
 
 ## Reproduce the next acceptance attempt
 
-Keep the existing provider key in TrueForge. Use a model with available free quota; do not repeatedly call a model whose daily limit has been exhausted. The actual account limits can be checked in AI Studio.
+Keep provider keys in TrueForge and check the current quota in the selected provider's dashboard. For Task B, the verified model is Particle-1 Free.
 
 ```powershell
 npm.cmd run spike
-npm.cmd run accept:live -- --task A --model google-gemini/gemini-3-8-flash --context 32768
-node scripts/verify-live-flask.mjs --task A
+npm.cmd run accept:live -- --task B --model openrouter/particle-1-free --context 32768
+node scripts/verify-live-flask.mjs --task B
 ```
 
 Run the verifier only after a reviewed patch was actually applied. For B, use `--task B` with the exact manifest prompt and no file hints, then run the B verifier. Each runner invocation requires a clean pinned checkout; preserve an earlier accepted change or use production checkpoint undo after recording its evidence. Never reset accepted work automatically.

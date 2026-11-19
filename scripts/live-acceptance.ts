@@ -8,7 +8,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { Workspace } from '../src/core/workspace.js';
-import { ContextEngine } from '../src/core/context.js';
+import { ContextEngine, retryContextOnChange } from '../src/core/context.js';
 import { ProposalManager } from '../src/core/proposals.js';
 import { EditorTools } from '../src/tools.js';
 import { ForgeClient, ForgeError, type ApprovalRequest } from '../src/trueforge.js';
@@ -86,7 +86,8 @@ async function main() {
   sessionId = await client.create(modelName, editor.name, task.mode, capacity, reasoningEffort);
   record.reasoningEffort = reasoningEffort || 'provider default';
   record.sessionId = sessionId; record.sessionUrl = client.sessionUrl(sessionId);
-  const initialContext = scope ? await context.forSelection(scope, budget, controller.signal) : await context.retrieve(task.prompt, budget, [], controller.signal);
+  const initialContext = scope ? await context.forSelection(scope, budget, controller.signal) :
+    await retryContextOnChange(() => context.retrieve(task.prompt, budget, [], controller.signal), controller.signal);
   record.context = initialContext;
   const selectionText = scope ? initialContext.chunks[0].content : '';
   // Task B receives the exact prompt plus GENERAL retrieval, never evaluator paths.

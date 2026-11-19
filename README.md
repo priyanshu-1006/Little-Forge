@@ -33,7 +33,7 @@ npm.cmd run check
 npm.cmd run harness
 ```
 
-Open **http://127.0.0.1:8790**. In **Settings → Models**, add your chosen catalog provider or OpenAI-compatible endpoint and its credentials. API keys stay in TrueForge. For a zero-spend starting point, follow the [Gemini free-tier setup](docs/FREE_MODEL_SETUP.md); provider accounts and usable free quota are required. The launcher pins harness **0.180.1**, keeps its SQLite state in ignored `.trueforge/`, binds localhost, and narrowly allows loopback MCP/model connections through its outbound guard. The local harness needs no Docker, deployed service, external database or login.
+Open Little Forge’s **Providers & models** picker from the model button at the top of the panel. Connect OpenRouter, Cloudflare Workers AI, Groq, Cohere, or Vercel through the picker. Use **TrueForge settings** to manage native Gemini, Ollama, and other OpenAI-compatible endpoints. Credentials are stored in TrueForge. See [free model setup](docs/FREE_MODEL_SETUP.md) for the model presets and recording workflow. The launcher pins harness **0.180.1**, keeps its SQLite state in ignored `.trueforge/`, binds localhost, and narrowly allows loopback MCP/model connections through its outbound guard. The local harness needs no Docker, deployed service, external database or login.
 
 In another terminal, build/package the extension:
 
@@ -100,7 +100,7 @@ npm.cmd run evaluate:retrieval
 
 The real-harness spike uses its own isolated local harness and a deterministic OpenAI-compatible **test fixture**, not real model reasoning. It verifies eager MCP tool exposure, reads, staging, harness approval, apply/undo, denial, late-grant rejection, streaming cancellation and model HTTP failures. It makes no paid API calls. `test:ui` uses installed Chrome (or `FORGE_BROWSER_CHANNEL=msedge`) to exercise the exact webview renderer with message fixtures. Native host smoke is separate.
 
-See [verification status](docs/VERIFICATION.md), [live acceptance notes](docs/LIVE_TEST_STATUS.md), [requirements and limitations](docs/REQUIREMENTS.md), and [fixed Flask evaluation](evaluation/README.md). The local Google provider is configured. Complete live A/B/C acceptance and final competition recording still require usable model quota and passing task results. Do not present fixture receipts as a solved live task.
+Task B passed on the pinned Flask checkout with OpenRouter Particle-1 Free. TrueForge applied an approved four-file change, and independent verification passed all 37 acceptance checks and 59 Flask CLI tests. Task A and C have separate native rehearsals. The final recording, video timestamps and submission are pending. See [verification status](docs/VERIFICATION.md), [live acceptance notes](docs/LIVE_TEST_STATUS.md), [requirements and limitations](docs/REQUIREMENTS.md), and [fixed Flask evaluation](evaluation/README.md).
 
 ## Starting point, licence and submission
 
