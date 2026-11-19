@@ -1,0 +1,9 @@
+{
+  "version": "0.1.2",
+  "file": "/downloads/little-forge-0.1.2.vsix",
+  "filename": "little-forge-0.1.2.vsix",
+  "bytes": 904161,
+  "sha256": "1a7af518a36de5acfd15f5792d4ec6cb9e7eef606859cf312e05bcfc97b8ad55",
+  "vscode": "1.96.0",
+  "node": "22.14.0"
+}
