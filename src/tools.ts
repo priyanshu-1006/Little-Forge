@@ -4,7 +4,18 @@ import type { ProposalManager } from './core/proposals.js';
 import { CommandRunner, type CommandInput } from './core/commands.js';
 import { applyExactReplacements } from './core/exact-replacements.js';
 import { cancelled, hash, type ContextResult, type FileSnapshot, type SelectionScope, type StageFile } from './core/types.js';
+import { ForgeError } from './trueforge.js';
 
+export interface ChangeGuardConfig {
+  maxFiles: number;
+  modifyFiles?: 'allowed' | 'ask' | 'disallowed';
+  createFiles?: 'allowed' | 'ask' | 'disallowed';
+  modifyDeps?: 'allowed' | 'ask' | 'disallowed';
+  modifyDatabase?: 'allowed' | 'ask' | 'disallowed';
+  executeCommands?: 'required' | 'auto' | 'disallowed';
+  allowDeps?: boolean;
+  safeMode?: boolean;
+}
 export interface ActiveRun { id: string; signal: AbortSignal; scope?: SelectionScope; contextBudget: number; performedAction: boolean }
 export class EditorTools {
   active?: ActiveRun;
@@ -14,7 +25,9 @@ export class EditorTools {
   private readonly readHistory = new Map<string, number>();
   private readonly runner: CommandRunner;
   constructor(readonly workspace: Workspace, readonly context: ContextEngine, readonly proposals: ProposalManager,
-    private readonly hooks: { context: (value: ContextResult) => void; proposal: (id: string) => void; activity: (text: string) => void; assertWritable: (paths: string[]) => void; diagnostics: (paths?: string[]) => unknown }) {
+    private readonly hooks: { context: (value: ContextResult) => void; proposal: (id: string) => void; activity: (text: string) => void; assertWritable: (paths: string[]) => void; diagnostics: (paths?: string[]) => unknown },
+    public changeGuard: ChangeGuardConfig = { maxFiles: 5, allowDeps: false, safeMode: true },
+    public permissionMode: string = 'auto') {
     this.runner = new CommandRunner(workspace);
   }
   start(run: ActiveRun) { this.reads.clear(); this.grants.clear(); this.searchHistory.clear(); this.readHistory.clear(); this.active = run; }
@@ -93,6 +106,49 @@ export class EditorTools {
     if (name === 'get_diagnostics') return this.hooks.diagnostics(args.paths as string[] | undefined);
     if (name === 'propose_changes') {
       const files = args.files as Array<{path:string;beforeHash:string|null;content?:string|null;edits?:Array<{oldText:string;newText:string}>}>;
+      // Change Guard enforcement
+      const maxFiles = this.changeGuard.maxFiles ?? 8;
+      if (files.length > maxFiles) {
+        throw new ForgeError(`Change Guard: This proposal touches ${files.length} files but your task contract limits edits to ${maxFiles} files. Increase the limit in your task settings or narrow the scope.`);
+      }
+
+      // Check modify existing files permission
+      if (this.changeGuard.modifyFiles === 'disallowed' && files.some(f => f.beforeHash !== null)) {
+        throw new ForgeError('Change Guard: Modifying existing files is disallowed by your task permissions.');
+      }
+
+      // Check create new files permission
+      if (this.changeGuard.createFiles === 'disallowed' && files.some(f => f.beforeHash === null)) {
+        throw new ForgeError('Change Guard: Creating new files is disallowed by your task permissions.');
+      }
+
+      const depPatterns = [
+        /^package\.json$/, /^package-lock\.json$/, /^yarn\.lock$/, /^pnpm-lock\.yaml$/,
+        /^requirements\.txt$/, /^Pipfile$/, /^Pipfile\.lock$/, /^poetry\.lock$/,
+        /^Gemfile$/, /^Gemfile\.lock$/, /^go\.mod$/, /^go\.sum$/, /^Cargo\.toml$/, /^Cargo\.lock$/
+      ];
+      const dbPatterns = [
+        /\.sql$/i, /schema\.prisma$/i, /(?:^|[\\/])migrations[\\/]/i, /(?:^|[\\/])alembic[\\/]/i
+      ];
+      const sensitivePatterns = [
+        ...depPatterns,
+        /^\.env/, /^\.gitignore$/, /^\.npmrc$/, /^\.yarnrc$/
+      ];
+
+      for (const file of files) {
+        const basename = file.path.split(/[\\/]/).pop() ?? file.path;
+        if (this.changeGuard.modifyDatabase === 'disallowed' && (dbPatterns.some(re => re.test(file.path)) || dbPatterns.some(re => re.test(basename)))) {
+          throw new ForgeError(`Change Guard: Changing database schema (${file.path}) is disallowed by your task permissions.`);
+        }
+        if (this.changeGuard.modifyDeps === 'disallowed' && depPatterns.some(re => re.test(basename))) {
+          throw new ForgeError(`Change Guard: Modifying package dependencies (${file.path}) is disallowed by your task permissions.`);
+        }
+        if (this.permissionMode !== 'turbo' && !this.changeGuard.allowDeps && this.changeGuard.modifyDeps !== 'allowed') {
+          if (sensitivePatterns.some(re => re.test(basename))) {
+            throw new ForgeError(`Change Guard: Modifying ${file.path} requires Turbo permission mode or enabling dependency edits in Task Contract.`);
+          }
+        }
+      }
       const prepared: StageFile[] = [];
       for (const file of files) {
         await this.workspace.resolve(file.path, file.beforeHash === null);
@@ -116,7 +172,10 @@ export class EditorTools {
       return { proposalId: proposal.id, files: proposal.files.map(f => ({ path: f.path, hunks: f.hunks.length })), next: 'Request apply_proposal with this proposalId to open the human review checkpoint. No source files have been written.' };
     }
     if (name === 'apply_proposal' || name === 'run_command') {
-      if (name === 'run_command' && run.scope) throw new Error('Inline edits cannot execute project commands.');
+      if (name === 'run_command') {
+        if (run.scope) throw new Error('Inline edits cannot execute project commands.');
+        if (this.changeGuard.executeCommands === 'disallowed') throw new ForgeError('Change Guard: Executing terminal commands is disallowed by your task permissions.');
+      }
       const key = this.key(name, args), grant = this.grants.get(key);
       if (!grant || grant.digest !== hash(JSON.stringify(args))) throw new Error('Missing or expired one-use editor approval.');
       this.grants.delete(key);

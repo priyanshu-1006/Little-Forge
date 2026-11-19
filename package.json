@@ -86,6 +86,22 @@
       {
         "command": "littleForge.decideHunk",
         "title": "Little Forge: Decide Proposed Hunk"
+      },
+      {
+        "command": "littleForge.newChat",
+        "title": "Little Forge: New Conversation"
+      },
+      {
+        "command": "littleForge.repro",
+        "title": "Little Forge: Repro-to-Regression"
+      },
+      {
+        "command": "littleForge.quickPlan",
+        "title": "Little Forge: Plan Implementation"
+      },
+      {
+        "command": "littleForge.quickTest",
+        "title": "Little Forge: Run Project Tests"
       }
     ],
     "keybindings": [
@@ -99,6 +115,16 @@
         "command": "littleForge.open",
         "key": "ctrl+alt+f",
         "mac": "cmd+alt+f"
+      },
+      {
+        "command": "littleForge.newChat",
+        "key": "ctrl+alt+n",
+        "mac": "cmd+alt+n"
+      },
+      {
+        "command": "littleForge.repro",
+        "key": "ctrl+alt+r",
+        "mac": "cmd+alt+r"
       }
     ],
     "viewsContainers": {

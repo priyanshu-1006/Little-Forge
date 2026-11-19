@@ -47,7 +47,7 @@ try {
   assert.equal(await page.getByRole('button',{name:'Apply selected hunks',exact:true}).isDisabled(),false);
   await page.screenshot({path:'test-results/ui/review-fixture.png',fullPage:true});
   assertions.push('Independent hunk actions carry exact IDs; only fully resolved review enables apply.');
-  await page.getByRole('button',{name:'■ Stop',exact:true}).click();
+  await page.locator('#stop').click();
   assert.equal(await page.evaluate(()=>window.__actions.at(-1).type),'stop');
   assertions.push('Stop remains available during harness review.');
   for (const width of [300,360,520]) { await page.setViewportSize({width,height:1100}); assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)); }
@@ -83,6 +83,7 @@ try {
   // Trace MUST remain closed - never reopened automatically by incoming tool steps!
   assert.equal(await page.evaluate(() => document.querySelector('.work-trace').open), false);
   // Verify steps were updated in-place inside the closed trace
+  await page.waitForFunction(() => document.querySelectorAll('.work-step-row').length === 4);
   const stepCount = await page.evaluate(() => document.querySelectorAll('.work-step-row').length);
   assert.equal(stepCount, 4);
   assertions.push('Antigravity work trace strictly preserves user collapse state during streaming tool updates.');
@@ -94,6 +95,66 @@ try {
   assert.equal(await page.locator('#prompt').isEnabled(),true);
   await page.screenshot({path:'test-results/ui/failure-fixture.png',fullPage:false});
   assertions.push('A new failure is visible above long context evidence after scrolling; the composer is usable.');
+
+  // Test 1: Attached Quick Commands Menu (/...)
+  await page.locator('#prompt').fill('/');
+  await page.locator('#slash-menu').waitFor({ state: 'visible' });
+  const slashItemsCount = await page.locator('#slash-items .input-popup-item').count();
+  assert.ok(slashItemsCount >= 7, `Expected at least 7 slash commands, found ${slashItemsCount}`);
+  // Keyboard arrow down and Enter to select /plan
+  await page.locator('#prompt').press('ArrowDown');
+  await page.locator('#prompt').press('Enter');
+  assert.equal(await page.locator('#slash-menu').isHidden(), true);
+  assert.match(await page.locator('#prompt').inputValue(), /^\/impact\s*$/); // second item was /impact after ArrowDown
+  assertions.push('Attached quick commands menu opens on / and supports arrow selection.');
+
+  // Test 2: Attached Mention Menu (@...)
+  await page.locator('#prompt').fill('Check this @');
+  await page.locator('#mention-menu').waitFor({ state: 'visible' });
+  const mentionItemsCount = await page.locator('#mention-items .input-popup-item').count();
+  assert.equal(mentionItemsCount, 3);
+  // Click @folder option
+  await page.locator('#mention-items button[data-kind="folder"]').click();
+  assert.equal(await page.locator('#mention-menu').isHidden(), true);
+  const mentionActions = await page.evaluate(() => window.__actions.filter(a => a.type === 'mention'));
+  assert.equal(mentionActions.at(-1)?.kind, 'folder');
+  assertions.push('Attached mention menu opens on @ and clicking @folder triggers designated mention action.');
+
+  // Test 3: Collapsible Tools Sidebar Drawer
+  await page.locator('#tools-toggle-btn').click();
+  await page.locator('#tools-sidebar').waitFor({ state: 'visible' });
+  assert.equal(await page.locator('#tools-sidebar button').count(), 5); // close + 4 tools
+  // Click Signals inside tools sidebar
+  await page.locator('#tools-sidebar #signals-btn').click();
+  await page.locator('#signals-drawer').waitFor({ state: 'visible' });
+  assert.equal(await page.locator('#tools-sidebar').isHidden(), true);
+  await page.locator('#signals-close').click();
+  assert.equal(await page.locator('#signals-drawer').isHidden(), true);
+  assertions.push('Collapsible tools sidebar opens and seamlessly launches signals drawer.');
+
+  // Test 4: Header Controls Responsive Layout at narrow widths and wide expansion
+  for (const w of [280, 320, 360, 600, 800]) {
+    await page.setViewportSize({ width: w, height: 900 });
+    const headerRowWidth = await page.locator('.header-controls-row').evaluate(el => el.scrollWidth);
+    const containerWidth = await page.locator('header').evaluate(el => el.clientWidth);
+    assert.ok(headerRowWidth <= containerWidth + 2, `Header controls row overflowed at ${w}px: ${headerRowWidth} > ${containerWidth}`);
+    assert.equal(await page.locator('#new-chat').isVisible(), true);
+    assert.equal(await page.locator('#history-btn').isVisible(), true);
+
+    // Verify Chat and + never overlap
+    const historyBox = await page.locator('#history-btn').boundingBox();
+    const newChatBox = await page.locator('#new-chat').boundingBox();
+    assert.ok(historyBox && newChatBox, 'Chat and new chat buttons must have bounding boxes');
+    assert.ok(historyBox.x + historyBox.width <= newChatBox.x + 0.5, `Chat and + must not overlap: history right (${historyBox.x + historyBox.width}) > new chat left (${newChatBox.x})`);
+
+    // Verify Model pill does not take all available space upon expanding
+    const modelBox = await page.locator('#model').boundingBox();
+    assert.ok(modelBox, 'Model button must have a bounding box');
+    assert.ok(modelBox.width <= 180, `Model button width (${modelBox.width}px) must not excessively balloon on expand at ${w}px`);
+  }
+  await page.screenshot({ path: 'test-results/ui/responsive-narrow.png', fullPage: false });
+  assertions.push('Model, review, chats, and new chat controls remain non-overlapping, balanced, and responsive across narrow and expanded widths.');
+
   assert.deepEqual(errors,[]);
   await writeFile('test-results/ui-smoke.json',JSON.stringify({checkedAt:new Date().toISOString(),fixture:'Exact extension renderer with a VS Code message fixture; not a native editor or live model run.',assertions,errors},null,2));
   console.log(JSON.stringify({assertions:assertions.length,errors:errors.length}));
