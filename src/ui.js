@@ -16,6 +16,22 @@ const vscode = acquireVsCodeApi();
 let state = { status: 'idle', messages: [], context: null, proposals: [], approvals: [], checkpoints: [], activity: [], connected: false, model: '', permissionMode: 'review', conversations: [], activeConversationId: '' };
 let renderedError = null;
 const isRunning = () => !['idle', 'completed', 'failed', 'cancelled'].includes(state.status);
+let errorTimer = null;
+let dismissedError = null;
+const dismissedProposals = new Set();
+const dismissedApprovals = new Set();
+const approvalDecisions = new Map();
+
+function formatCommandString(args) {
+  if (!args) return 'command';
+  const task = args.task || 'command';
+  const extra = Array.isArray(args.args) ? args.args.join(' ') : '';
+  if (task === 'pytest') return extra ? `pytest ${extra}` : 'pytest';
+  if (task === 'npm-test') return extra ? `npm test -- ${extra}` : 'npm test';
+  if (task === 'typecheck') return 'npx tsc --noEmit';
+  if (task === 'git-diff-check') return 'git diff --check';
+  return extra ? `${task} ${extra}` : String(task);
+}
 const $ = id => document.getElementById(id);
 const send = (type, data = {}) => vscode.postMessage({ type, ...data });
 const saved = vscode.getState?.() ?? {};
@@ -610,13 +626,22 @@ function renderReview() {
   const currentKeys = new Set(state.proposals.flatMap(proposal => proposal.files.map(file => `${proposal.id}:${file.path}`)));
   for (const key of fileReviewOpen.keys()) if (!currentKeys.has(key)) fileReviewOpen.delete(key);
   const focus = list.contains(document.activeElement) ? document.activeElement.dataset.reviewFocus : undefined;
-  list.replaceChildren(...state.proposals.map(proposal => {
+  const activeProposals = state.proposals.filter(proposal => !dismissedProposals.has(proposal.id));
+  list.replaceChildren(...activeProposals.map(proposal => {
     const section = element('section', 'review');
     const editable = proposal.state === 'pending' && !state.auxiliary;
     const counts = reviewSummary(proposal);
     const head = element('div', 'review-header');
     const status = { pending: 'Staged', applied: 'Applied', rejected: 'Rejected', expired: 'Expired' }[proposal.state];
     head.append(element('strong', '', 'Review changes'), element('small', `outcome-${proposal.state}`, `${proposal.files.length} ${proposal.files.length === 1 ? 'file' : 'files'} · ${status}`));
+    const dismissBtn = button('', 'card-dismiss-btn', () => {
+      dismissedProposals.add(proposal.id);
+      send('dismissProposal', { proposalId: proposal.id });
+      section.remove();
+    });
+    dismissBtn.title = 'Dismiss review';
+    dismissBtn.innerHTML = SVG_ICONS.close;
+    head.append(dismissBtn);
     section.append(head, element('p', 'review-progress', `${counts.accept} accepted · ${counts.reject} rejected · ${counts.pending} pending`));
     const layout = element('div', 'review-actions');
     if (proposal.state === 'pending') {
@@ -670,8 +695,25 @@ function renderReview() {
       section.append(group);
     }
     const footer = element('div', 'review-footer');
-    footer.append(button(counts.accept ? 'Apply selected hunks' : 'Finish review', 'primary wide', () => send('apply', { proposalId: proposal.id }), current?.id !== proposal.id || !!counts.pending || !editable || (!!counts.accept && stale)));
-    if (proposal.state === 'pending') footer.append(button('Reject all remaining', 'mention-button', () => send('rejectRemaining', { proposalId: proposal.id }), !editable));
+    if (proposal.state === 'pending') {
+      footer.append(button(counts.accept ? 'Apply selected hunks' : 'Finish review', 'primary wide', () => send('apply', { proposalId: proposal.id }), current?.id !== proposal.id || !!counts.pending || !editable || (!!counts.accept && stale)));
+      footer.append(button('Reject all remaining', 'mention-button', () => send('rejectRemaining', { proposalId: proposal.id }), !editable));
+    } else {
+      const resolvedRow = element('div', 'review-resolved-row');
+      const resolvedMsg = element('div', `review-resolved-msg ${proposal.state}`);
+      resolvedMsg.innerHTML = proposal.state === 'applied'
+        ? `<span class="icon-inline">${SVG_ICONS.check}</span> Changes applied to workspace`
+        : `<span class="icon-inline">${SVG_ICONS.close}</span> Proposed changes rejected`;
+
+      const dismissActionBtn = button('Dismiss', 'review-dismiss-action', () => {
+        dismissedProposals.add(proposal.id);
+        send('dismissProposal', { proposalId: proposal.id });
+        section.remove();
+      });
+      dismissActionBtn.title = 'Dismiss review';
+      resolvedRow.append(resolvedMsg, dismissActionBtn);
+      footer.append(resolvedRow);
+    }
     section.append(footer);
     return section;
   }));
@@ -1004,24 +1046,111 @@ function render() {
   renderEvidence();
   renderContextEditor();
 
-  // Render command checks with modern card styling
-  $('command-list').replaceChildren(...state.approvals.filter(a => a.name === 'run_command').map(a => {
+  // Render command checks with modern agent CLI card styling
+  const activeApprovals = state.approvals.filter(a => a.name === 'run_command' && !dismissedApprovals.has(a.toolCallId));
+  $('command-list').replaceChildren(...activeApprovals.map(a => {
     const card = element('div', 'command-card');
+    const decision = approvalDecisions.get(a.toolCallId);
+
+    // Header
     const header = element('div', 'command-card-header');
-    const termIcon = element('span', 'icon-inline');
+    const headerLeft = element('div', 'command-header-left');
+    const termIcon = element('span', 'command-header-icon');
     termIcon.innerHTML = SVG_ICONS.terminal;
-    header.append(termIcon, element('strong', '', 'Run project check?'));
+
+    const tagStatus = decision ? decision : 'required';
+    const tagText = decision === 'allowed' ? 'Allowed' : decision === 'denied' ? 'Denied' : 'Approval required';
+    const badgeTag = element('span', `command-badge-tag ${tagStatus}`, tagText);
+
+    headerLeft.append(termIcon, element('span', 'command-card-title', 'Terminal Command Request'), badgeTag);
+
+    // Cross / dismiss button
+    const crossBtn = button('', 'card-dismiss-btn', () => {
+      dismissedApprovals.add(a.toolCallId);
+      if (!decision) {
+        approvalDecisions.set(a.toolCallId, 'denied');
+        send('commandDecision', { toolCallId: a.toolCallId, allow: false });
+      }
+      send('dismissApproval', { toolCallId: a.toolCallId });
+      card.remove();
+    });
+    crossBtn.title = 'Dismiss / Cancel request';
+    crossBtn.innerHTML = SVG_ICONS.close;
+    header.append(headerLeft, crossBtn);
     card.append(header);
 
-    const cmdStr = Array.isArray(a.args?.args) ? a.args.args.join(' ') : String(a.args?.task || 'command');
-    card.append(element('div', 'command-pill', `${a.args?.task || 'task'}: ${cmdStr}`));
-    card.append(element('p', 'command-hint', 'Project code runs with your user permissions and may have side effects.'));
+    // Command CLI code box
+    const cmdStr = formatCommandString(a.args);
+    const cliBox = element('div', 'command-cli-box');
+    const cliLine = element('div', 'command-cli-line');
+    const promptSym = element('span', 'command-prompt-symbol', '$');
+    const codeEl = element('code', 'command-cli-code', cmdStr);
+    cliLine.append(promptSym, codeEl);
 
+    const copyBtn = element('button', 'command-copy-btn');
+    copyBtn.type = 'button';
+    copyBtn.title = 'Copy command';
+    copyBtn.innerHTML = `${SVG_ICONS.copy}<span>Copy</span>`;
+    copyBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      navigator.clipboard.writeText(cmdStr).then(() => {
+        copyBtn.innerHTML = `${SVG_ICONS.check}<span>Copied!</span>`;
+        setTimeout(() => {
+          copyBtn.innerHTML = `${SVG_ICONS.copy}<span>Copy</span>`;
+        }, 1500);
+      }).catch(() => {});
+    });
+
+    cliBox.append(cliLine, copyBtn);
+    card.append(cliBox);
+
+    // Security note
+    const secRow = element('div', 'command-security-row');
+    const shieldIcon = element('span', 'command-security-icon');
+    shieldIcon.innerHTML = SVG_ICONS.shield;
+    secRow.append(shieldIcon, element('span', '', 'Runs locally in workspace with your user permissions'));
+    card.append(secRow);
+
+    // Actions
     const actions = element('div', 'command-actions');
-    actions.append(
-      button('Deny', 'small-button', () => send('commandDecision', { toolCallId: a.toolCallId, allow: false })),
-      button('Allow once', 'small-button accepted', () => send('commandDecision', { toolCallId: a.toolCallId, allow: true }))
-    );
+    function showResolvedActions(status) {
+      actions.replaceChildren();
+      const statusRow = element('div', 'command-status-row');
+      const statusMsg = element('div', `command-status-msg ${status}`);
+      statusMsg.innerHTML = status === 'allowed'
+        ? `<span class="icon-inline">${SVG_ICONS.check}</span> Command allowed`
+        : `<span class="icon-inline">${SVG_ICONS.close}</span> Command denied`;
+
+      const dismissAction = button('Dismiss', 'review-dismiss-action', () => {
+        dismissedApprovals.add(a.toolCallId);
+        send('dismissApproval', { toolCallId: a.toolCallId });
+        card.remove();
+      });
+      dismissAction.title = 'Dismiss';
+      statusRow.append(statusMsg, dismissAction);
+      actions.append(statusRow);
+    }
+
+    if (!decision) {
+      const denyBtn = button('Deny', 'command-action-btn command-deny-btn', () => {
+        approvalDecisions.set(a.toolCallId, 'denied');
+        send('commandDecision', { toolCallId: a.toolCallId, allow: false });
+        badgeTag.className = 'command-badge-tag denied';
+        badgeTag.textContent = 'Denied';
+        showResolvedActions('denied');
+      });
+      const allowBtn = button('Allow once', 'command-action-btn command-allow-btn', () => {
+        approvalDecisions.set(a.toolCallId, 'allowed');
+        send('commandDecision', { toolCallId: a.toolCallId, allow: true });
+        badgeTag.className = 'command-badge-tag allowed';
+        badgeTag.textContent = 'Allowed';
+        showResolvedActions('allowed');
+      });
+      actions.append(denyBtn, allowBtn);
+    } else {
+      showResolvedActions(decision);
+    }
+
     card.append(actions);
     return card;
   }));
@@ -1277,7 +1406,7 @@ function renderRepro(state) {
   }
 }
 
-function createImpactRadarCard(res) {
+function createImpactRadarCard(res, isStandalone = false) {
   const card = element('div', `impact-radar-card ${res.riskLevel}`);
   const hdr = element('div', 'impact-header');
   const title = element('div', 'impact-title');
@@ -1285,7 +1414,22 @@ function createImpactRadarCard(res) {
   icon.innerHTML = SVG_ICONS.zap;
   title.append(icon, document.createTextNode(' Impact Radar · '), element('code', '', res.targetFile));
   const badge = element('span', `impact-badge ${res.riskLevel}`, `${res.riskLevel.toUpperCase()} RISK`);
-  hdr.append(title, badge);
+  
+  if (isStandalone) {
+    const hdrRight = element('div', 'impact-hdr-right');
+    hdrRight.style.display = 'flex';
+    hdrRight.style.alignItems = 'center';
+    hdrRight.style.gap = '6px';
+    hdrRight.append(badge);
+
+    const dismissBtn = button('', 'card-dismiss-btn', () => card.remove());
+    dismissBtn.title = 'Dismiss Impact Radar';
+    dismissBtn.innerHTML = SVG_ICONS.close;
+    hdrRight.append(dismissBtn);
+    hdr.append(title, hdrRight);
+  } else {
+    hdr.append(title, badge);
+  }
   card.append(hdr);
 
   const body = element('div', 'impact-body');
@@ -1326,10 +1470,12 @@ function createImpactRadarCard(res) {
 function renderImpactRadarCards(transcript, state) {
   const results = Array.isArray(state.impactResults) ? state.impactResults : [];
   if (results.length === 0) return;
-  // If there are no pending proposals in review-list, display the cards in transcript
-  if (!state.proposals.some(p => p.state === 'pending')) {
+  // If proposals are displayed in review-list, impact is embedded inside the proposal cards.
+  // Only display in transcript if there are no visible proposals.
+  const activeProposals = state.proposals.filter(p => !dismissedProposals.has(p.id));
+  if (activeProposals.length === 0) {
     for (const res of results) {
-      transcript.append(createImpactRadarCard(res));
+      transcript.append(createImpactRadarCard(res, true));
     }
   }
 }

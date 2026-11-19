@@ -397,7 +397,23 @@ class ForgeExtension implements vscode.WebviewViewProvider, vscode.Disposable {
       }
       case 'rejectRemaining': { const id = str('proposalId'); const proposal = this.assertCurrent(id); for (const file of proposal.files) for (const hunk of file.hunks) if (hunk.decision === 'pending') this.proposals!.decide(id, hunk.id, 'reject'); this.refreshProposal(id); return; }
       case 'apply': await this.applySelection(str('proposalId')); return;
+      case 'dismissProposal': {
+        const id = str('proposalId');
+        this.state.proposals = this.state.proposals.filter(p => p.id !== id);
+        this.publish(true);
+        return;
+      }
       case 'commandDecision': { const id = str('toolCallId'); const approval = this.state.approvals.find(a => a.toolCallId === id && a.name === 'run_command'); if (!approval || !this.run) throw new Error('This command approval expired.'); this.run.decisions.set(id, message.allow === true); await this.maybeResume(); return; }
+      case 'dismissApproval': {
+        const id = str('toolCallId');
+        if (this.run && !this.run.decisions.has(id)) {
+          this.run.decisions.set(id, false);
+          void this.maybeResume();
+        }
+        this.state.approvals = this.state.approvals.filter(a => a.toolCallId !== id);
+        this.publish(true);
+        return;
+      }
       case 'undo': await this.undo(str('id')); return;
       case 'openDiff': await this.openFileDiff(str('path')); return;
       case 'startRepro': this.startRepro(); return;
