@@ -85,6 +85,16 @@ export class ProposalManager {
 
   get(id: string): Proposal { return clone(this.require(id)); }
 
+  async changedPaths(id: string, signal?: AbortSignal, selectedOnly = false): Promise<string[]> {
+    const changed: string[] = [];
+    for (const file of this.require(id).files) {
+      if (selectedOnly && !file.hunks.some(hunk => hunk.decision === 'accept')) continue;
+      cancelled(signal);
+      if ((await this.current(file.path)).hash !== file.baseHash) changed.push(file.path);
+    }
+    return changed;
+  }
+
   decide(id: string, hunkId: string, decision: 'accept' | 'reject'): void {
     const proposal = this.requirePending(id);
     if (this.busy.has(id)) throw new Error('This proposal is being applied.');

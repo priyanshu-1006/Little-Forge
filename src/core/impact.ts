@@ -1,47 +1,15 @@
-import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
+import { Workspace, WORKSPACE_LIMITS } from './workspace.js';
 
 export interface ImpactResult {
   targetFile: string;
   consumers: string[];     // files that import the target
   relatedTests: string[];  // test files that mention the target's basename
   riskLevel: 'low' | 'medium' | 'high';
+  partial?: boolean;
 }
 
 const SCANNABLE_EXT = /\.(ts|js|tsx|jsx|py)$/i;
-const SKIP_DIRS = new Set(['node_modules', 'dist', '.git', 'build', 'out', '.venv', 'venv', '__pycache__']);
-
-/** Returns true if the file/dir should be skipped */
-function shouldSkip(name: string): boolean {
-  return SKIP_DIRS.has(name);
-}
-
-/** Collect all scannable files recursively under root, respecting abort signal */
-async function collectFiles(root: string, signal?: AbortSignal): Promise<string[]> {
-  const results: string[] = [];
-  const queue: string[] = [root];
-  while (queue.length > 0) {
-    if (signal?.aborted) return results;
-    const dir = queue.pop()!;
-    let entries;
-    try {
-      entries = await fs.readdir(dir, { withFileTypes: true });
-    } catch {
-      continue;
-    }
-    for (const entry of entries) {
-      if (signal?.aborted) return results;
-      if (shouldSkip(entry.name)) continue;
-      const full = path.join(dir, entry.name);
-      if (entry.isDirectory()) {
-        queue.push(full);
-      } else if (entry.isFile() && SCANNABLE_EXT.test(entry.name)) {
-        results.push(full);
-      }
-    }
-  }
-  return results;
-}
 
 /** Returns true if filePath is a test file */
 function isTestFile(filePath: string): boolean {
@@ -87,60 +55,60 @@ export async function analyzeImpact(
   workspaceRoot: string,
   signal?: AbortSignal
 ): Promise<ImpactResult[]> {
-  if (!modifiedFiles.length) return [];
+  if (!modifiedFiles.length || signal?.aborted) return [];
 
-  // Collect all scannable files once
-  const allFiles = await collectFiles(workspaceRoot, signal);
-
-  const results: ImpactResult[] = [];
-
-  for (const targetFile of modifiedFiles) {
-    if (signal?.aborted) break;
-
-    const basename = path.basename(targetFile, path.extname(targetFile));
-    const targetAbsolute = path.resolve(workspaceRoot, targetFile);
-
-    const consumers: string[] = [];
-    const relatedTests: string[] = [];
-
-    for (const filePath of allFiles) {
-      if (signal?.aborted) break;
-      // Don't scan the file itself
-      if (path.resolve(filePath) === targetAbsolute) continue;
-
-      let content: string;
-      try {
-        content = await fs.readFile(filePath, 'utf-8');
-      } catch {
-        continue;
-      }
-
-      const relative = path.relative(workspaceRoot, filePath).replace(/\\/g, '/');
-      const isTest = isTestFile(filePath);
-
-      if (isTest) {
-        // For test files: check if they import/require OR broadly mention the basename
-        if (mentionsBasename(content, basename) || mentionsBasenameLoose(content, basename)) {
-          relatedTests.push(relative);
-        }
-      } else {
-        // For non-test source files: check import/require patterns only
-        if (mentionsBasename(content, basename)) {
-          consumers.push(relative);
-        }
-      }
+  const workspace = new Workspace(workspaceRoot);
+  const targets = new Set<string>();
+  for (const file of modifiedFiles) {
+    if (signal?.aborted) return [];
+    try {
+      targets.add(workspace.relative(await workspace.resolve(file, true)));
+    } catch {
+      continue;
     }
+  }
+  if (!targets.size) return [];
 
-    const riskLevel: 'low' | 'medium' | 'high' =
-      consumers.length >= 3 ? 'high' : consumers.length >= 1 ? 'medium' : 'low';
-
-    results.push({
-      targetFile,
-      consumers,
-      relatedTests,
-      riskLevel,
-    });
+  const candidates = await workspace.list(signal).catch(error => {
+    if (signal?.aborted) return [];
+    throw error;
+  });
+  let partial = workspace.listingTruncated;
+  let bytes = 0;
+  const files: { path: string; content: string; test: boolean }[] = [];
+  for (const entry of candidates) {
+    if (signal?.aborted) return [];
+    if (!SCANNABLE_EXT.test(entry.path)) continue;
+    if (entry.size > WORKSPACE_LIMITS.fileBytes || files.length >= 500 || bytes + entry.size > WORKSPACE_LIMITS.searchBytes) {
+      partial = true;
+      continue;
+    }
+    bytes += entry.size;
+    try {
+      const snapshot = await workspace.read(entry.path, signal);
+      files.push({ path: snapshot.path, content: snapshot.content, test: isTestFile(snapshot.path) });
+    } catch {
+      partial = true;
+    }
   }
 
+  const results: ImpactResult[] = [];
+  for (const targetFile of targets) {
+    if (signal?.aborted) return [];
+    const basename = path.basename(targetFile, path.extname(targetFile));
+    const consumers: string[] = [];
+    const relatedTests: string[] = [];
+    for (const file of files) {
+      if (file.path === targetFile) continue;
+      const importsTarget = mentionsBasename(file.content, basename);
+      if (file.test) {
+        if (importsTarget || mentionsBasenameLoose(file.content, basename)) relatedTests.push(file.path);
+      } else if (importsTarget) {
+        consumers.push(file.path);
+      }
+    }
+    const riskLevel = consumers.length >= 3 ? 'high' : consumers.length >= 1 ? 'medium' : 'low';
+    results.push({ targetFile, consumers, relatedTests, riskLevel, ...(partial && { partial }) });
+  }
   return results;
 }

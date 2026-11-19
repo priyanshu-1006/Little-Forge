@@ -4,6 +4,8 @@ import type { ProposalManager } from './core/proposals.js';
 import { CommandRunner, type CommandInput } from './core/commands.js';
 import { applyExactReplacements } from './core/exact-replacements.js';
 import { cancelled, hash, type ContextResult, type FileSnapshot, type SelectionScope, type StageFile } from './core/types.js';
+import type { ApplyResult, Proposal } from './core/types.js';
+import type { CheckPhase, CheckRecord } from './core/run-evidence.js';
 import { ForgeError } from './trueforge.js';
 
 export interface ChangeGuardConfig {
@@ -16,7 +18,7 @@ export interface ChangeGuardConfig {
   allowDeps?: boolean;
   safeMode?: boolean;
 }
-export interface ActiveRun { id: string; signal: AbortSignal; scope?: SelectionScope; contextBudget: number; performedAction: boolean }
+export interface ActiveRun { id: string; signal: AbortSignal; scope?: SelectionScope; contextBudget: number; performedAction: boolean; readOnly?: boolean; excludedPaths?: string[] }
 export class EditorTools {
   active?: ActiveRun;
   private readonly reads = new Map<string, FileSnapshot>();
@@ -25,7 +27,7 @@ export class EditorTools {
   private readonly readHistory = new Map<string, number>();
   private readonly runner: CommandRunner;
   constructor(readonly workspace: Workspace, readonly context: ContextEngine, readonly proposals: ProposalManager,
-    private readonly hooks: { context: (value: ContextResult) => void; proposal: (id: string) => void; activity: (text: string) => void; assertWritable: (paths: string[]) => void; diagnostics: (paths?: string[]) => unknown },
+    private readonly hooks: { context: (value: ContextResult) => void; proposal: (id: string) => void; activity: (text: string) => void; assertWritable: (paths: string[]) => void; diagnostics: (paths?: string[]) => unknown; applied?: (proposal: Proposal, result: ApplyResult) => void; check?: (record: CheckRecord) => void },
     public changeGuard: ChangeGuardConfig = { maxFiles: 5, allowDeps: false, safeMode: true },
     public permissionMode: string = 'auto') {
     this.runner = new CommandRunner(workspace);
@@ -34,6 +36,7 @@ export class EditorTools {
   stop() { if (this.active) this.proposals.discardRun(this.active.id); this.grants.clear(); this.searchHistory.clear(); this.readHistory.clear(); this.active = undefined; }
   authorize(name: string, args: Record<string, unknown>, toolCallId: string) {
     const run = this.requireRun();
+    if (run.readOnly) throw new Error('This workflow allows read-only tools.');
     if (name === 'apply_proposal') this.proposals.authorize(String(args.proposalId), run.id, toolCallId);
     else if (name !== 'run_command') throw new Error('Unknown sensitive tool.');
     this.grants.set(this.key(name, args), { toolCallId, digest: hash(JSON.stringify(args)) });
@@ -56,6 +59,7 @@ export class EditorTools {
   }
   private async dispatch(name: string, args: Record<string, unknown>): Promise<unknown> {
     const run = this.requireRun();
+    if (run.readOnly && ['propose_changes', 'apply_proposal', 'run_command'].includes(name)) throw new Error('This workflow allows read-only tools.');
     let activityText = name.replaceAll('_', ' ');
     if (name === 'search_workspace' && args.query) activityText = `search workspace: "${args.query}"`;
     else if (name === 'read_file' && args.path) activityText = `read file: ${args.path}`;
@@ -73,7 +77,7 @@ export class EditorTools {
       const matches = await this.workspace.search(query, args.glob as string | undefined, args.limit as number | undefined, run.signal);
       let guidance: string | undefined;
       if (matches.length === 0) {
-        guidance = 'No matches found in repository. If you are searching for the requested command or feature (e.g. config or a new function), remember it does NOT exist yet — you are tasked with CREATING it! Inspect existing commands in src/flask/cli.py to see how commands are registered, then proceed directly to propose_changes.';
+        guidance = 'No matches found. For a new feature, inspect existing related code from the retrieved context or search for a comparable feature before proposing changes.';
       } else if (count > 1) {
         guidance = 'Repeated search query. If target files are found, read them freshly to obtain their hashes and proceed directly to propose_changes.';
       }
@@ -99,7 +103,7 @@ export class EditorTools {
     }
     if (name === 'find_symbols') return { symbols: (await this.context.symbols(args.query as string | undefined, run.signal)).slice(0, 100) };
     if (name === 'retrieve_context') {
-      const result = await this.context.retrieve(String(args.query), Math.min(run.contextBudget, Number(args.budgetTokens ?? run.contextBudget)), [], run.signal);
+      const result = await this.context.retrieve(String(args.query), Math.min(run.contextBudget, Number(args.budgetTokens ?? run.contextBudget)), [], run.signal, run.excludedPaths);
       for (const chunk of result.chunks) this.reads.set(chunk.path, await this.workspace.read(chunk.path, run.signal));
       this.hooks.context(result); return result;
     }
@@ -186,22 +190,36 @@ export class EditorTools {
         if (result.status === 'applied') {
           run.performedAction = true;
           this.context.invalidate();
-          for (const f of proposal.files) this.hooks.activity(`edited file: ${f.path}`);
+          for (const changed of result.paths) this.hooks.activity(`edited file: ${changed}`);
+          this.hooks.applied?.(proposal, result);
         }
         return result;
       }
-      this.hooks.assertWritable([]);
       run.performedAction = true; // A project check can have side effects; never retry its parent turn.
-      const before = await this.fingerprints(run.signal);
-      const result = await this.runner.run(args as unknown as CommandInput, run.signal);
+      const { result, changedSource, detectionPartial } = await this.verify(args as unknown as CommandInput, 'agent', run.signal);
       cancelled(run.signal);
       const cmdStr = (args.args as string[])?.join(' ') || args.task;
       this.hooks.activity(`ran command: ${cmdStr}${result.exitCode !== null ? ` · Exit code ${result.exitCode}` : ''}`);
-      const after = await this.fingerprints(run.signal);
-      const changedSource = [...new Set([...before.hashes.keys(), ...after.hashes.keys()])].filter(p => before.hashes.has(p) && after.hashes.has(p) && before.hashes.get(p) !== after.hashes.get(p));
-      return { ...result, changedSource, detectionPartial: before.partial || after.partial, warning: changedSource.length ? 'The project check changed source files. These are command side effects; inspect them before proceeding.' : undefined };
+      return { ...result, changedSource, detectionPartial, warning: changedSource.length ? 'The project check changed source files. These are command side effects; inspect them before proceeding.' : undefined };
     }
     throw new Error('Unknown editor tool.');
+  }
+  async verify(input: CommandInput, phase: CheckPhase, signal?: AbortSignal): Promise<CheckRecord> {
+    if (this.changeGuard.executeCommands === 'disallowed') throw new ForgeError('Change Guard: Executing terminal commands is disallowed by your task permissions.');
+    this.hooks.assertWritable([]);
+    if (this.active) this.active.performedAction = true;
+    const before = await this.fingerprints(signal);
+    const started = Date.now();
+    const result = await this.runner.run(input, signal);
+    const after = signal?.aborted ? { hashes: before.hashes, partial: true } : await this.fingerprints(signal);
+    const detectionPartial = before.partial || after.partial;
+    const changedSource = [...new Set([...before.hashes.keys(), ...after.hashes.keys()])].filter(file => {
+      if (detectionPartial && (!before.hashes.has(file) || !after.hashes.has(file))) return false;
+      return before.hashes.get(file) !== after.hashes.get(file);
+    });
+    const record = { input, phase, durationMs: Date.now() - started, result, changedSource, detectionPartial };
+    this.hooks.check?.(record);
+    return record;
   }
   private async fingerprints(signal?: AbortSignal) {
     const hashes = new Map<string, string>(); let bytes = 0, partial = false;

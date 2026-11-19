@@ -28,6 +28,17 @@ async function fixture(t: TestContext, scope?: SelectionScope) {
 }
 type Staged = { proposalId: string; files: { path: string; hunks: number }[] };
 
+test('read-only mode can read but cannot stage, authorize or execute an editor mutation', async t => {
+  const f = await fixture(t);
+  await f.put('app.ts', 'export const x = 1;');
+  f.tools.start({ ...f.run, readOnly: true });
+  assert.equal((await f.tools.call('read_file', { path: 'app.ts' }) as { path: string }).path, 'app.ts');
+  for (const tool of ['propose_changes', 'apply_proposal', 'run_command']) {
+    await assert.rejects(f.tools.call(tool, {}), /read-only/);
+    assert.throws(() => f.tools.authorize(tool, {}, 'unexpected-call'), /read-only/);
+  }
+});
+
 test('existing-file proposals require fresh read evidence and source hash', async t => {
   const f = await fixture(t); const original = 'export const value = 1;\n'; await f.put('app.ts', original);
   await assert.rejects(f.tools.call('propose_changes', { files: [{ path: 'app.ts', beforeHash: hash(original), content: 'changed' }] }), /Read .* freshly/);

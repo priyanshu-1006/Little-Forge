@@ -48,7 +48,7 @@
     "package": "npm run build && vsce package --no-dependencies --no-rewrite-relative-links",
     "harness": "node scripts/start-harness.mjs",
     "spike": "tsx scripts/spike.ts",
-    "test:ui": "node scripts/ui-smoke.mjs",
+    "test:ui": "npm run build && node scripts/ui-smoke.mjs",
     "evaluate:retrieval": "tsx scripts/evaluate-retrieval.ts",
     "accept:live": "tsx scripts/live-acceptance.ts",
     "accept:prepare": "node scripts/prepare-live.mjs"
@@ -102,6 +102,18 @@
       {
         "command": "littleForge.quickTest",
         "title": "Little Forge: Run Project Tests"
+      },
+      {
+        "command": "littleForge.isolated",
+        "title": "Little Forge: Open Isolated Git Worktree"
+      },
+      {
+        "command": "littleForge.exportEvidence",
+        "title": "Little Forge: Export ForgeProof Receipt"
+      },
+      {
+        "command": "littleForge.draftPullRequest",
+        "title": "Little Forge: Prepare Local Draft Pull Request"
       }
     ],
     "keybindings": [
@@ -177,7 +189,12 @@
         },
         "littleForge.reasoningEffort": {
           "type": "string",
-          "enum": ["", "low", "medium", "high"],
+          "enum": [
+            "",
+            "low",
+            "medium",
+            "high"
+          ],
           "default": "",
           "scope": "application",
           "description": "Optional reasoning level passed through TrueForge. Empty uses the provider default. Select only a level supported by both the primary and fallback models."
@@ -192,10 +209,15 @@
         },
         "littleForge.permissionMode": {
           "type": "string",
-          "enum": ["review", "default", "auto", "turbo"],
-          "default": "auto",
+          "enum": [
+            "review",
+            "default",
+            "auto",
+            "turbo"
+          ],
+          "default": "review",
           "scope": "application",
-          "description": "Local permission mode: review (ask before any change/command), default (ask sensitive), auto (auto-apply safe edits and checks), turbo (fully autonomous in workspace)."
+          "description": "Every source change requires hunk review. Auto and Turbo can approve supported project checks."
         }
       }
     }
@@ -203,7 +225,9 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.26.0",
     "diff": "8.0.2",
+    "highlight.js": "11.11.1",
     "ignore": "7.0.5",
+    "markdown-it": "14.3.3",
     "zod": "4.1.12"
   },
   "devDependencies": {

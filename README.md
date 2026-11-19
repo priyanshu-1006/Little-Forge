@@ -61,6 +61,15 @@ Open a trusted local repository in that window. Open **Little Forge** in the act
 
 **Stop:** locally revokes grants immediately, aborts the stream, requests harness cancellation and terminates owned checks with bounded cleanup. Source writes in progress use journaled rollback. A previously completed, user-approved change remains explicit until undone.
 
+## Workflows and evidence
+
+- Choose **Ask** for a repository answer or **Plan** for a proposed implementation. Both use read-only tools. **Build** and inline edits stage source changes for hunk review.
+- Open **Edit context** before sending to preview, pin, remove, or replace automatically selected references. Explicit mentions take precedence over automatic exclusions. Enable **Language-server links** to supplement lexical retrieval with callers, definitions, implementations, and references from installed VS Code language providers.
+- During review, use **Alt+N** for the next pending hunk, **Alt+A** to accept, **Alt+R** to reject, and **Alt+Enter** to apply a resolved proposal. **Refresh proposal** reissues a stale request against current source and opens a new review. An inline selection that changed needs to be reselected.
+- **Select checks** proposes commands based on affected paths. Run them once as a baseline, then use **Run same checks** after applying. Check comparisons use command outcomes. **Second opinion** submits bounded staged excerpts to a different configured TrueForge model in a session with no workspace tools.
+- Set optional time, reported-token, and estimated-cost limits before sending. The cost estimate uses the blended USD rate you enter. Usage limits are checked when TrueForge reports usage, including completed requests. They can stop further work but cannot retroactively block charges already incurred.
+- Export a **ForgeProof** receipt with the session IDs, reviewed patches, check results, and checkpoint IDs. The receipt includes reviewed source. **More → Open isolated worktree** opens a new worktree of committed HEAD on its own local branch. **Prepare draft PR** creates or reuses a local Little Forge branch and opens a description for review. Publishing is a separate action. **More → Demo mode** enlarges the evidence for screen recording.
+
 ## TrueForge boundary
 
 ```text

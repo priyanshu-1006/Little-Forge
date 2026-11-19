@@ -16,14 +16,18 @@ test('analyzeImpact identifies direct consumers and related test files', async (
     await fs.writeFile(path.join(tmp, 'src', 'service.ts'), "const auth = require('./auth');\n");
     await fs.writeFile(path.join(tmp, 'tests', 'auth.test.ts'), "import { login } from '../src/auth';\n");
     await fs.writeFile(path.join(tmp, 'src', 'unrelated.ts'), 'export const value = 42;\n');
+    await fs.writeFile(path.join(tmp, '.littleforgeignore'), 'private.ts\n');
+    await fs.writeFile(path.join(tmp, 'private.ts'), "import { login } from './auth';\n");
+    await fs.writeFile(path.join(tmp, 'credentials.ts'), "import { login } from './auth';\n");
 
-    const results = await analyzeImpact(['src/auth.ts'], tmp);
+    const results = await analyzeImpact(['src/auth.ts', 'private.ts', 'credentials.ts'], tmp);
     assert.equal(results.length, 1);
     const authResult = results[0];
     assert.equal(authResult.targetFile, 'src/auth.ts');
     assert.ok(authResult.consumers.some(c => c.includes('router.ts')));
     assert.ok(authResult.consumers.some(c => c.includes('service.ts')));
     assert.ok(!authResult.consumers.some(c => c.includes('unrelated.ts')));
+    assert.ok(!authResult.consumers.some(c => c === 'private.ts' || c === 'credentials.ts'));
     assert.ok(authResult.relatedTests.some(t => t.includes('auth.test.ts')));
     assert.equal(authResult.riskLevel, 'medium'); // 2 consumers
   } finally {

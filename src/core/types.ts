@@ -7,7 +7,7 @@ export interface FileSnapshot { path: string; content: string; hash: string }
 export interface SearchHit { path: string; line: number; text: string }
 export interface ContextChunk { path: string; startLine: number; endLine: number; content: string; reason: string; tokens: number; hash: string; declarations?: Array<{name: string; line: number}> }
 export interface ContextResult { chunks: ContextChunk[]; usedTokens: number; budgetTokens: number; indexedFiles: number; truncated: boolean; selectionOnly?: boolean }
-export interface Mention { kind: 'file' | 'symbol'; path: string; name?: string; line?: number }
+export interface Mention { kind: 'file' | 'symbol'; path: string; name?: string; line?: number; reason?: string }
 export interface SelectionScope { path: string; hash: string; start: number; end: number }
 export interface StageFile { path: string; beforeHash: string | null; content: string | null }
 export type HunkDecision = 'pending' | 'accept' | 'reject';

@@ -262,7 +262,7 @@ export class ContextEngine {
     return (await this.index(signal)).indexed.flatMap(file => file.symbols).filter(symbol => !value || symbol.name.toLowerCase().includes(value)).slice(0, 2000).map(symbol => ({ ...symbol }));
   }
 
-  async retrieve(query: string, budgetTokens: number, mentions: Mention[] = [], signal?: AbortSignal): Promise<ContextResult> {
+  async retrieve(query: string, budgetTokens: number, mentions: Mention[] = [], signal?: AbortSignal, excludedPaths: readonly string[] = []): Promise<ContextResult> {
     if (!Number.isSafeInteger(budgetTokens) || budgetTokens < 0 || budgetTokens > 1_000_000) throw new Error('Context budget must be a whole number between 0 and 1,000,000.');
     if (mentions.length > 24) throw new Error('Use at most 24 explicit context mentions per run.');
     cancelled(signal);
@@ -271,6 +271,7 @@ export class ContextEngine {
     const terms = [...direct, ...expanded];
     const lookup = new Map(index.indexed.map(file => [file.entry.path, file]));
     const candidates: Candidate[] = index.indexed.flatMap(file => {
+      if (excludedPaths.some(excluded => matchesPath(excluded, file.entry.path))) return [];
       const pathTerms = termWords(file.entry.path), names = file.symbols.flatMap(symbol => termWords(symbol.name));
       const pathMatches = direct.filter(term => pathTerms.includes(term));
       const symbolMatches = direct.filter(term => names.includes(term));
@@ -285,7 +286,7 @@ export class ContextEngine {
       if (extra.length) reasons.push(`Related terms: ${extra.slice(0, 4).join(', ')}`);
       if (query.toLowerCase().includes(file.entry.path.toLowerCase())) { score += 35; reasons.unshift('Path named in request'); }
       const base: Candidate = { file, score, reasons, role: role(file.entry.path) };
-      return explicitMentions.length ? explicitMentions.map(explicit => ({ ...base, score: score + 10000, explicit, reasons: [explicit.kind === 'symbol' ? `Explicit @symbol: ${explicit.name ?? 'selected symbol'}` : 'Explicit @file mention', ...reasons] })) : [base];
+      return explicitMentions.length ? explicitMentions.map(explicit => ({ ...base, score: score + (explicit.reason?.startsWith('Language server') ? 100 : 10000), explicit, reasons: [explicit.reason ?? (explicit.kind === 'symbol' ? `Explicit @symbol: ${explicit.name ?? 'selected symbol'}` : 'Explicit @file mention'), ...reasons] })) : [base];
     });
     const order = (a: Candidate, b: Candidate): number => b.score - a.score || (a.file.entry.path < b.file.entry.path ? -1 : 1);
     const seeds = [...candidates].sort(order).filter(candidate => candidate.score > 0).slice(0, 4);

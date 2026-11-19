@@ -8,6 +8,8 @@ Principal dependencies:
 - Model Context Protocol TypeScript SDK 1.26.0: https://github.com/modelcontextprotocol/typescript-sdk (MIT).
 - jsdiff 8.0.2: https://github.com/kpdecker/jsdiff (BSD-3-Clause).
 - ignore 7.0.5: https://github.com/kaelzhang/node-ignore (MIT).
+- highlight.js 11.11.1: https://github.com/highlightjs/highlight.js (BSD-3-Clause).
+- markdown-it 14.3.3: https://github.com/markdown-it/markdown-it (MIT).
 - Zod 4.1.12: https://github.com/colinhacks/zod (MIT).
 - Development tools include TypeScript, esbuild, tsx, VS Code packaging/types and Playwright Core; their original package notices apply.
 

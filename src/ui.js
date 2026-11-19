@@ -1,13 +1,35 @@
+import MarkdownIt from 'markdown-it';
+import highlighter from 'highlight.js/lib/core';
+import bash from 'highlight.js/lib/languages/bash';
+import diff from 'highlight.js/lib/languages/diff';
+import javascript from 'highlight.js/lib/languages/javascript';
+import json from 'highlight.js/lib/languages/json';
+import powershell from 'highlight.js/lib/languages/powershell';
+import python from 'highlight.js/lib/languages/python';
+import typescript from 'highlight.js/lib/languages/typescript';
+import xml from 'highlight.js/lib/languages/xml';
+
+for (const [name, language] of Object.entries({ bash, diff, javascript, json, powershell, python, typescript, xml })) highlighter.registerLanguage(name, language);
+
 /* Host-owned state; model text is always rendered safely through textContent/DOM nodes. */
 const vscode = acquireVsCodeApi();
-let state = { status: 'idle', messages: [], context: null, proposals: [], approvals: [], checkpoints: [], activity: [], connected: false, model: '', permissionMode: 'auto', conversations: [], activeConversationId: '' };
+let state = { status: 'idle', messages: [], context: null, proposals: [], approvals: [], checkpoints: [], activity: [], connected: false, model: '', permissionMode: 'review', conversations: [], activeConversationId: '' };
 let renderedError = null;
-let errorTimer = null;
-let dismissedError = null;
+const isRunning = () => !['idle', 'completed', 'failed', 'cancelled'].includes(state.status);
 const $ = id => document.getElementById(id);
 const send = (type, data = {}) => vscode.postMessage({ type, ...data });
+const saved = vscode.getState?.() ?? {};
+const draft = { pins: [], excluded: [], semantic: false };
+let demoMode = saved.demo === true;
+let replacement;
 const element = (tag, cls, text) => { const el = document.createElement(tag); if (cls) el.className = cls; if (text !== undefined) el.textContent = text; return el; };
 function button(text, cls, action, disabled = false) { const el = element('button', cls, text); el.disabled = disabled; el.addEventListener('click', action); return el; }
+
+const markdown = new MarkdownIt({ html: false, linkify: true });
+const markdownTags = new Set([
+  'a', 'blockquote', 'em', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'li', 'ol', 'p', 's', 'strong',
+  'table', 'tbody', 'td', 'th', 'thead', 'tr', 'ul',
+]);
 
 const SVG_ICONS = {
   zap: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>',
@@ -185,151 +207,151 @@ function formatToolStep(raw) {
   return { iconSvg: SVG_ICONS.terminal, label: text };
 }
 
-function renderInlineToNodes(text) {
-  const tokenRegex = /(\*\*[^*]+?\*\*|`[^`]+?`|\[[^\]]+?\]\([^)]+?\)|(?<!\*)\*[^*]+?\*(?!\*))/g;
-  const parts = text.split(tokenRegex).filter(Boolean);
-  const frag = document.createDocumentFragment();
-  for (const part of parts) {
-    if (part.startsWith('**') && part.endsWith('**') && part.length >= 4) {
-      const strong = element('strong', 'markdown-strong');
-      strong.append(renderInlineToNodes(part.slice(2, -2)));
-      frag.append(strong);
-    } else if (part.startsWith('`') && part.endsWith('`') && part.length >= 2) {
-      const code = element('code', 'inline-code', part.slice(1, -1));
-      frag.append(code);
-    } else if (part.startsWith('[') && part.includes('](') && part.endsWith(')')) {
-      const idx = part.indexOf('](');
-      const a = element('a', 'markdown-link', part.slice(1, idx));
-      a.href = part.slice(idx + 2, -1);
-      a.target = '_blank';
-      a.rel = 'noopener noreferrer';
-      frag.append(a);
-    } else if (part.startsWith('*') && part.endsWith('*') && part.length >= 2 && !part.startsWith('**')) {
-      const em = element('em', '', part.slice(1, -1));
-      frag.append(em);
-    } else {
-      frag.append(document.createTextNode(part));
+function renderCodeBlock(code, info) {
+  const language = info.trim().split(/\s+/, 1)[0];
+  const wrapper = element('div', 'code-block-wrapper');
+  const header = element('div', 'code-block-header');
+  const controls = element('div', 'block-controls');
+  const copyBtn = button('Copy', 'copy-btn', async () => {
+    let feedback = 'Copied';
+    try { await navigator.clipboard.writeText(code); }
+    catch { feedback = 'Copy failed'; }
+    copyBtn.textContent = feedback;
+    setTimeout(() => { copyBtn.textContent = 'Copy'; }, 2000);
+  });
+  copyBtn.type = 'button';
+  copyBtn.setAttribute('aria-label', 'Copy code');
+  const pre = element('pre', 'code-block-content');
+  const content = element('code', '', code);
+  const grammar = language?.toLowerCase();
+  if (grammar && code.length <= 16000 && highlighter.getLanguage(grammar)) {
+    content.className = `language-${grammar}`;
+    highlighter.highlightElement(content);
+  }
+  pre.append(content);
+  const toggle = (name, key, action, activeLabel = name) => {
+    const control = button(name, 'copy-btn', () => {
+      const value = control.getAttribute('aria-pressed') !== 'true';
+      control.setAttribute('aria-pressed', String(value));
+      control.textContent = value ? activeLabel : name;
+      action(value);
+    });
+    control.type = 'button';
+    control.dataset.codeControl = key;
+    control.setAttribute('aria-pressed', 'false');
+    return control;
+  };
+  controls.append(
+    toggle('Wrap', 'wrap', active => pre.classList.toggle('wrap-code', active), 'Unwrap'),
+    toggle('Collapse', 'collapse', active => { body.hidden = active; }, 'Expand'),
+    copyBtn,
+  );
+  const body = element('div', 'code-block-body');
+  body.append(pre);
+  if (/^(md|markdown)$/i.test(language)) {
+    const preview = element('div', 'markdown-preview-body');
+    preview.hidden = true;
+    controls.prepend(toggle('Preview', 'preview', active => {
+      if (active && !preview.hasChildNodes()) renderMessageContent(preview, code);
+      pre.hidden = active;
+      preview.hidden = !active;
+    }, 'Source'));
+    body.append(preview);
+  }
+  header.append(element('span', 'code-block-language', language || 'Code'), controls);
+  wrapper.append(header, body);
+  return wrapper;
+}
+
+function appendMarkdownTokens(target, tokens) {
+  const stack = [target];
+  for (const token of tokens) {
+    if (token.hidden) continue;
+    const parent = stack.at(-1);
+    if (token.nesting && markdownTags.has(token.tag)) {
+      if (token.nesting < 0) {
+        stack.pop();
+        continue;
+      }
+
+      const href = token.tag === 'a' ? token.attrGet('href') : null;
+      const safeLink = href && /^https?:\/\//i.test(href);
+      const citation = href?.match(/^(?:\.\/)?([^:#?]+\.[\w+-]+)#L([1-9]\d*)(?:-L\d+)?$/);
+      const node = element(token.tag === 'a' && !safeLink && !citation ? 'span' : token.tag);
+      if (safeLink) {
+        node.href = href;
+        node.target = '_blank';
+        node.rel = 'noopener noreferrer';
+        const title = token.attrGet('title');
+        if (title) node.title = title;
+      }
+      if (citation) {
+        let file;
+        try { file = decodeURIComponent(citation[1]); } catch { file = citation[1]; }
+        node.href = '#';
+        node.title = `Open ${file} at line ${citation[2]}`;
+        node.addEventListener('click', event => {
+          event.preventDefault();
+          send('openSource', { path: file, line: Number(citation[2]) });
+        });
+      }
+      if (token.tag === 'ol') {
+        const start = token.attrGet('start');
+        if (start !== null) node.start = Number(start);
+      }
+      if (token.tag === 'th' || token.tag === 'td') {
+        const alignment = /^text-align:(center|right)$/.exec(token.attrGet('style') || '');
+        if (alignment) node.className = `markdown-align-${alignment[1]}`;
+      }
+      if (token.tag === 'table') {
+        const scroll = element('div', 'markdown-table');
+        scroll.tabIndex = 0;
+        scroll.setAttribute('role', 'region');
+        scroll.setAttribute('aria-label', 'Scrollable table');
+        scroll.append(node);
+        parent.append(scroll);
+      } else {
+        parent.append(node);
+      }
+      stack.push(node);
+      continue;
+    }
+
+    switch (token.type) {
+      case 'inline': appendMarkdownTokens(parent, token.children); break;
+      case 'text': parent.append(token.content); break;
+      case 'softbreak': parent.append('\n'); break;
+      case 'hardbreak': parent.append(element('br')); break;
+      case 'hr': parent.append(element('hr')); break;
+      case 'code_inline': parent.append(element('code', 'inline-code', token.content)); break;
+      case 'fence':
+      case 'code_block': parent.append(renderCodeBlock(token.content, token.info)); break;
+      // Model replies can reference images, but rendering a reply must never fetch them.
+      case 'image': parent.append(token.content || '[Image]'); break;
     }
   }
-  return frag;
 }
 
 function renderMessageContent(container, rawText) {
-  const parts = rawText.split('```');
-  parts.forEach((part, index) => {
-    if (index % 2 === 1) {
-      const firstLineBreak = part.indexOf('\n');
-      const lang = firstLineBreak !== -1 ? part.slice(0, firstLineBreak).trim() : '';
-      const code = firstLineBreak !== -1 ? part.slice(firstLineBreak + 1) : part;
-
-      const wrapper = element('div', 'code-block-wrapper');
-      const header = element('div', 'code-block-header');
-      header.append(element('span', 'code-lang-label', lang || 'CODE'));
-
-      const copyBtn = button('Copy', 'copy-btn', () => {
-        if (navigator.clipboard) {
-          navigator.clipboard.writeText(code).then(() => {
-            copyBtn.textContent = 'Copied';
-            setTimeout(() => { copyBtn.textContent = 'Copy'; }, 2000);
-          }).catch(() => undefined);
-        }
-      });
-      header.append(copyBtn);
-      wrapper.append(header);
-
-      const pre = element('pre', 'code-block-content');
-      const codeEl = element('code', '', code);
-      pre.append(codeEl);
-      wrapper.append(pre);
-      container.append(wrapper);
-    } else {
-      if (!part) return;
-      const lines = part.split('\n');
-      let currentList = null;
-      let currentParagraph = null;
-
-      function flushParagraph() {
-        if (currentParagraph) {
-          container.append(currentParagraph);
-          currentParagraph = null;
-        }
-      }
-
-      function flushList() {
-        if (currentList) {
-          container.append(currentList);
-          currentList = null;
-        }
-      }
-
-      for (let i = 0; i < lines.length; i++) {
-        const line = lines[i];
-        const trimmed = line.trim();
-
-        if (!trimmed) {
-          flushParagraph();
-          flushList();
-          continue;
-        }
-
-        if (/^(\-{3,}|\*{3,})$/.test(trimmed)) {
-          flushParagraph();
-          flushList();
-          container.append(element('hr', 'markdown-hr'));
-          continue;
-        }
-
-        const headerMatch = trimmed.match(/^(#{1,4})\s+(.+)$/);
-        if (headerMatch) {
-          flushParagraph();
-          flushList();
-          const level = headerMatch[1].length;
-          const h = element(`h${level}`, `markdown-h${level}`);
-          h.append(renderInlineToNodes(headerMatch[2]));
-          container.append(h);
-          continue;
-        }
-
-        const olMatch = trimmed.match(/^(\d+)\.\s+(.+)$/);
-        if (olMatch) {
-          flushParagraph();
-          if (!currentList || currentList.tagName.toLowerCase() !== 'ol') {
-            flushList();
-            currentList = element('ol', 'markdown-ol');
-          }
-          const li = element('li', 'markdown-li');
-          li.value = Number(olMatch[1]);
-          li.append(renderInlineToNodes(olMatch[2]));
-          currentList.append(li);
-          continue;
-        }
-
-        const ulMatch = trimmed.match(/^[\*\-]\s+(.+)$/);
-        if (ulMatch) {
-          flushParagraph();
-          if (!currentList || currentList.tagName.toLowerCase() !== 'ul') {
-            flushList();
-            currentList = element('ul', 'markdown-ul');
-          }
-          const li = element('li', 'markdown-li');
-          li.append(renderInlineToNodes(ulMatch[1]));
-          currentList.append(li);
-          continue;
-        }
-
-        flushList();
-        if (!currentParagraph) {
-          currentParagraph = element('p', 'markdown-p');
-        } else {
-          currentParagraph.append(element('br'));
-        }
-        currentParagraph.append(renderInlineToNodes(line));
-      }
-
-      flushParagraph();
-      flushList();
-    }
+  const blockControls = root => [...root.querySelectorAll('.code-block-wrapper')].filter(block => !block.parentElement?.closest('.markdown-preview-body'));
+  const savedControls = blockControls(container).map(block => Array.from(block.querySelectorAll(':scope > .code-block-header [aria-pressed="true"]'), control => control.dataset.codeControl));
+  const content = document.createDocumentFragment();
+  appendMarkdownTokens(content, markdown.parse(rawText, {}));
+  container.replaceChildren(content);
+  blockControls(container).forEach((block, i) => {
+    for (const key of savedControls[i] ?? []) block.querySelector(`:scope > .code-block-header [data-code-control="${key}"]`)?.click();
   });
+}
+
+function plainResponse(text) {
+  const blocks = new Set(['paragraph_close', 'heading_close', 'list_item_close', 'blockquote_close', 'tr_close']);
+  const extract = tokens => tokens.map(token => {
+    if (token.children) return extract(token.children);
+    if (blocks.has(token.type) || token.type.endsWith('break')) return '\n';
+    if (token.type === 'td_close' || token.type === 'th_close') return '\t';
+    return token.content || '';
+  }).join('');
+  return extract(markdown.parse(text, {})).trim();
 }
 
 function renderStepList(list, steps) {
@@ -400,7 +422,7 @@ function createWorkTraceElement(busy, steps) {
     const cur = getCurrentProcess(state, busy);
     timerSpan.replaceChildren(createDynamicLoadingElement(cur.text));
   } else {
-    timerSpan.textContent = `Worked for ${formatDuration(lastCompletedDuration || 14)}`;
+    timerSpan.textContent = `Worked for ${formatDuration(lastCompletedDuration ?? 0)}`;
   }
   const twisty = element('span', 'work-trace-twisty', '▾');
   summary.append(timerSpan, twisty);
@@ -428,98 +450,6 @@ function createWorkTraceElement(busy, steps) {
   return trace;
 }
 
-function createForgeProofCard(files, checks, checkpointId, sessionId) {
-  const card = element('div', 'forgeproof-card');
-  
-  const header = element('div', 'forgeproof-header');
-  const titleGroup = element('div', 'forgeproof-title-group');
-  const badge = element('span', 'forgeproof-badge');
-  badge.innerHTML = `<span class="icon-inline">${SVG_ICONS.check}</span> Verified`;
-  titleGroup.append(badge, element('strong', 'forgeproof-title', 'ForgeProof Outcome'));
-  header.append(titleGroup);
-  card.append(header);
-
-  if (files.length > 0) {
-    const filesSection = element('div', 'forgeproof-section');
-    const secLabel = element('div', 'forgeproof-section-label');
-    secLabel.innerHTML = `<span class="icon-inline">${SVG_ICONS.folder}</span> ${files.length} Modified ${files.length === 1 ? 'File' : 'Files'}`;
-    filesSection.append(secLabel);
-
-    const pillList = element('div', 'forgeproof-file-list');
-    for (const f of files) {
-      const b = getLangBadge(f);
-      const pill = element('button', 'forgeproof-file-pill');
-      pill.title = `Click to inspect diff for ${f}`;
-      if (b) pill.append(element('span', `lang-tag ${b.cls}`, b.label));
-      pill.append(element('span', 'forgeproof-filename', f));
-      pill.append(element('span', 'forgeproof-diff-action', 'Diff ↗'));
-      pill.addEventListener('click', e => {
-        e.stopPropagation();
-        send('openDiff', { path: f });
-      });
-      pillList.append(pill);
-    }
-    filesSection.append(pillList);
-    card.append(filesSection);
-  }
-
-  if (checks.length > 0) {
-    const checkSection = element('div', 'forgeproof-section');
-    const chkLabel = element('div', 'forgeproof-section-label');
-    chkLabel.innerHTML = `<span class="icon-inline">${SVG_ICONS.check}</span> Verification Checks`;
-    checkSection.append(chkLabel);
-    const checkList = element('div', 'forgeproof-check-list');
-    for (const c of checks) {
-      const cRow = element('div', 'forgeproof-check-row');
-      const chkIcon = element('span', 'check-icon');
-      chkIcon.innerHTML = SVG_ICONS.check;
-      cRow.append(chkIcon, element('span', 'check-text', c.text));
-      checkList.append(cRow);
-    }
-    checkSection.append(checkList);
-    card.append(checkSection);
-  }
-
-  const footer = element('div', 'forgeproof-footer');
-  
-  if (checkpointId) {
-    const undoBtn = button('Undo Changes', 'forgeproof-action-btn undo', () => send('undo', { id: checkpointId }));
-    undoBtn.innerHTML = `<span class="icon-inline">${SVG_ICONS.undo}</span> Undo Changes`;
-    undoBtn.title = 'Restore workspace to checkpoint snapshot';
-    footer.append(undoBtn);
-  }
-
-  if (sessionId) {
-    const sessBtn = button('Session ↗', 'forgeproof-action-btn session', () => send('session'));
-    sessBtn.title = 'Open TrueForge session in browser';
-    footer.append(sessBtn);
-  }
-
-  const copyBtn = button('Copy Proof', 'forgeproof-action-btn copy', () => {
-    const text = [
-      `### Little Forge 2.0 — ForgeProof Outcome`,
-      `- **Session**: \`${sessionId || 'local'}\``,
-      `- **Files Changed** (${files.length}):`,
-      ...files.map(f => `  - \`${f}\``),
-      `- **Checks**:`,
-      ...checks.map(c => `  - ${c.text}`),
-      `- **Checkpoint**: \`${checkpointId || 'active'}\` (undo available)`,
-      `- **Permissions**: Protected sensitive perimeter`
-    ].join('\n');
-    if (navigator.clipboard) {
-      navigator.clipboard.writeText(text).then(() => {
-        copyBtn.innerHTML = `<span class="icon-inline">${SVG_ICONS.check}</span> Copied!`;
-        setTimeout(() => { copyBtn.innerHTML = `<span class="icon-inline">${SVG_ICONS.copy}</span> Copy Proof`; }, 2000);
-      });
-    }
-  });
-  copyBtn.innerHTML = `<span class="icon-inline">${SVG_ICONS.copy}</span> Copy Proof`;
-  footer.append(copyBtn);
-
-  card.append(footer);
-  return card;
-}
-
 function updateActiveAssistantRow(row, message, busy, state, steps) {
   const modelTag = row.querySelector('.model-tag');
   if (modelTag && state.model) {
@@ -540,7 +470,7 @@ function updateActiveAssistantRow(row, message, busy, state, steps) {
           const cur = getCurrentProcess(state, busy);
           timerSpan.replaceChildren(createDynamicLoadingElement(cur.text));
         } else {
-          timerSpan.textContent = `Worked for ${formatDuration(lastCompletedDuration || 14)}`;
+          timerSpan.textContent = `Worked for ${formatDuration(lastCompletedDuration ?? 0)}`;
         }
       }
 
@@ -591,23 +521,6 @@ function updateActiveAssistantRow(row, message, busy, state, steps) {
     }
   }
 
-  // ForgeProof Outcome Card
-  const existingProof = row.querySelector('.forgeproof-card');
-  const allFiles = [...new Set([
-    ...state.checkpoints.flatMap(cp => cp.paths),
-    ...state.proposals.flatMap(p => p.files.map(f => f.path)),
-    ...state.activity.filter(a => a.startsWith('edited file:') || a.startsWith('staged file:')).map(a => a.replace(/^(?:edited file|staged file):/, '').trim())
-  ])];
-  const allChecks = steps.filter(s => s.type === 'command');
-  const latestCpId = state.checkpoints.length > 0 ? state.checkpoints[state.checkpoints.length - 1].id : undefined;
-
-  if (!busy && (allFiles.length > 0 || allChecks.length > 0) && (state.status === 'completed' || state.checkpoints.length > 0)) {
-    if (!existingProof) {
-      row.append(createForgeProofCard(allFiles, allChecks, latestCpId, state.sessionId));
-    }
-  } else if (existingProof && busy) {
-    existingProof.remove();
-  }
 }
 
 function buildMessageRow(message, idx, isLast, busy, state, steps) {
@@ -624,6 +537,22 @@ function buildMessageRow(message, idx, isLast, busy, state, steps) {
     if (state.model) {
       header.append(element('span', 'model-tag', state.model.split('/').pop()));
     }
+    const copy = element('details', 'reply-copy');
+    const copyStatus = element('summary', '', 'Copy reply');
+    const actions = element('div', 'reply-copy-actions');
+    for (const [label, transform] of [['Markdown', text => text], ['Plain text', plainResponse]]) {
+      actions.append(button(label, 'small-button', async () => {
+        try {
+          const text = row.querySelector('.message-body').dataset.text || '';
+          await navigator.clipboard.writeText(transform(text));
+          copyStatus.textContent = 'Copied';
+        } catch { copyStatus.textContent = 'Copy failed'; }
+        copy.open = false;
+        setTimeout(() => { copyStatus.textContent = 'Copy reply'; }, 2000);
+      }));
+    }
+    copy.append(copyStatus, actions);
+    header.append(copy);
     row.append(header);
 
     if ((steps.length > 0 || busy) && isLast) {
@@ -633,30 +562,280 @@ function buildMessageRow(message, idx, isLast, busy, state, steps) {
 
   const body = element('div', 'message-body');
   body.dataset.text = message.text || '';
-  if (message.text && message.text.trim()) {
-    renderMessageContent(body, message.text);
-  }
+  if (isUser) body.textContent = message.text || '';
+  else if (message.text && message.text.trim()) renderMessageContent(body, message.text);
   row.append(body);
 
-  if (!isUser) {
-    const allFiles = [...new Set([
-      ...state.checkpoints.flatMap(cp => cp.paths),
-      ...state.proposals.flatMap(p => p.files.map(f => f.path)),
-      ...state.activity.filter(a => a.startsWith('edited file:') || a.startsWith('staged file:')).map(a => a.replace(/^(?:edited file|staged file):/, '').trim())
-    ])];
-    const allChecks = steps.filter(s => s.type === 'command');
-    const latestCpId = state.checkpoints.length > 0 ? state.checkpoints[state.checkpoints.length - 1].id : undefined;
-
-    if (!busy && (allFiles.length > 0 || allChecks.length > 0) && (state.status === 'completed' || state.checkpoints.length > 0)) {
-      row.append(createForgeProofCard(allFiles, allChecks, latestCpId, state.sessionId));
-    }
-  }
 
   return row;
 }
 
+const fileReviewOpen = new Map();
+let reviewSignature;
+let activeApproval;
+function activeReview() {
+  return state.proposals.find(proposal => proposal.state === 'pending' && state.approvals.some(a => a.name === 'apply_proposal' && a.args?.proposalId === proposal.id));
+}
+
+function reviewSummary(proposal) {
+  const counts = { accept: 0, reject: 0, pending: 0 };
+  for (const file of proposal.files) for (const hunk of file.hunks) counts[hunk.decision]++;
+  return counts;
+}
+
+function nextHunk() {
+  const id = activeReview()?.id;
+  const group = [...document.querySelectorAll('#review-list .hunk[data-decision="pending"]')].find(hunk => hunk.dataset.proposalId === id);
+  if (!group) return;
+  group.closest('details').open = true;
+  group.scrollIntoView({ block: 'center' });
+  group.focus({ preventScroll: true });
+}
+
+function renderReview() {
+  const current = activeReview();
+  const bar = $('review-bar');
+  bar.hidden = !current;
+  if (current) {
+    const counts = reviewSummary(current);
+    $('review-count').textContent = `${counts.accept} accepted · ${counts.reject} rejected · ${counts.pending} pending`;
+    $('next-hunk').disabled = !counts.pending;
+    $('sticky-apply').textContent = counts.accept ? 'Apply' : 'Finish';
+    $('sticky-apply').disabled = !!(counts.pending || state.auxiliary || (counts.accept && state.stale?.proposalId === current.id));
+  }
+  const signature = JSON.stringify([state.proposals, current?.id, state.auxiliary, state.stale, state.verification?.proposalId, state.impactResults]);
+  if (signature === reviewSignature) return;
+  reviewSignature = signature;
+  const list = $('review-list');
+  const currentKeys = new Set(state.proposals.flatMap(proposal => proposal.files.map(file => `${proposal.id}:${file.path}`)));
+  for (const key of fileReviewOpen.keys()) if (!currentKeys.has(key)) fileReviewOpen.delete(key);
+  const focus = list.contains(document.activeElement) ? document.activeElement.dataset.reviewFocus : undefined;
+  list.replaceChildren(...state.proposals.map(proposal => {
+    const section = element('section', 'review');
+    const editable = proposal.state === 'pending' && !state.auxiliary;
+    const counts = reviewSummary(proposal);
+    const head = element('div', 'review-header');
+    const status = { pending: 'Staged', applied: 'Applied', rejected: 'Rejected', expired: 'Expired' }[proposal.state];
+    head.append(element('strong', '', 'Review changes'), element('small', `outcome-${proposal.state}`, `${proposal.files.length} ${proposal.files.length === 1 ? 'file' : 'files'} · ${status}`));
+    section.append(head, element('p', 'review-progress', `${counts.accept} accepted · ${counts.reject} rejected · ${counts.pending} pending`));
+    const layout = element('div', 'review-actions');
+    if (proposal.state === 'pending') {
+      layout.append(
+        button('Accept all', 'small-button', () => send('acceptAllHunks', { proposalId: proposal.id }), !editable),
+        button('Second opinion', 'small-button', () => send('reviewPatch', { proposalId: proposal.id }), !editable || current?.id !== proposal.id),
+      );
+    }
+    if ((proposal.state === 'pending' || proposal.state === 'applied') && state.verification?.proposalId !== proposal.id) {
+      layout.append(button('Select checks', 'small-button', () => send('planChecks', { proposalId: proposal.id }), !!state.auxiliary || (proposal.state === 'pending' && current?.id !== proposal.id)));
+    }
+    const stale = state.stale?.proposalId === proposal.id;
+    if (stale || proposal.state === 'expired') {
+      if (stale) section.append(element('p', 'review-note', `Changed since staging: ${state.stale.paths.join(', ')}`));
+      layout.append(button('Refresh proposal', 'small-button', () => send('refreshStale', { proposalId: proposal.id }), !!state.auxiliary));
+    }
+    section.append(layout);
+    for (const file of proposal.files) {
+      const pending = file.hunks.filter(hunk => hunk.decision === 'pending').length;
+      const key = `${proposal.id}:${file.path}`;
+      const group = element('details', `review-file${pending ? ' has-pending' : ''}`);
+      group.open = fileReviewOpen.get(key) ?? pending > 0;
+      group.addEventListener('toggle', () => fileReviewOpen.set(key, group.open));
+      group.append(element('summary', 'review-file-label', `${file.path} · ${pending} pending`));
+      group.append(button('Open diff ↗', 'small-button review-diff', () => send('preview', { proposalId: proposal.id, path: file.path })));
+      for (const [i, hunk] of file.hunks.entries()) {
+        const line = (file.original || '').slice(0, hunk.start).split('\n').length;
+        const row = element('div', 'hunk');
+        row.tabIndex = -1;
+        row.dataset.decision = hunk.decision;
+        row.dataset.hunkId = hunk.id;
+        row.dataset.proposalId = proposal.id;
+        row.dataset.reviewFocus = hunk.id;
+        const label = element('div', 'hunk-label');
+        label.append(element('span', '', `Hunk ${i + 1} · Line ${line}`), element('span', '', hunk.decision));
+        row.append(label);
+        if (hunk.before) row.append(element('pre', 'before', hunk.before));
+        if (hunk.after) row.append(element('pre', 'after', hunk.after));
+        const actions = element('div', 'hunk-actions');
+        for (const decision of ['reject', 'accept']) {
+          const choice = button(decision === 'accept' ? 'Accept' : 'Reject', `small-button ${hunk.decision === decision ? decision + 'ed' : ''}`, () => send('decide', { proposalId: proposal.id, hunkId: hunk.id, decision }), !editable);
+          choice.dataset.reviewFocus = `${hunk.id}:${decision}`;
+          choice.setAttribute('aria-pressed', String(hunk.decision === decision));
+          actions.append(choice);
+        }
+        row.append(actions);
+        group.append(row);
+      }
+      const impact = state.impactResults?.find(result => result.targetFile === file.path);
+      if (impact) group.append(createImpactRadarCard(impact));
+      section.append(group);
+    }
+    const footer = element('div', 'review-footer');
+    footer.append(button(counts.accept ? 'Apply selected hunks' : 'Finish review', 'primary wide', () => send('apply', { proposalId: proposal.id }), current?.id !== proposal.id || !!counts.pending || !editable || (!!counts.accept && stale)));
+    if (proposal.state === 'pending') footer.append(button('Reject all remaining', 'mention-button', () => send('rejectRemaining', { proposalId: proposal.id }), !editable));
+    section.append(footer);
+    return section;
+  }));
+  if (focus) Array.from(list.querySelectorAll('[data-review-focus]')).find(node => node.dataset.reviewFocus === focus)?.focus({ preventScroll: true });
+  if (current?.id !== activeApproval) {
+    activeApproval = current?.id;
+    if (current && document.hasFocus() && !focus) requestAnimationFrame(nextHunk);
+  }
+}
+
+const checkName = input => [input.task, ...(input.args ?? [])].join(' ');
+const checkPassed = check => check.result.exitCode === 0 && !check.result.timedOut && !check.result.cancelled && check.result.cleanupConfirmed;
+function checkStatus(check, checks) {
+  if (check.result.cancelled) return 'Cancelled';
+  if (check.result.timedOut) return 'Timed out';
+  if (check.result.exitCode === null) return 'Could not finish';
+  const passed = checkPassed(check);
+  const previous = check.phase === 'after' ? checks.find(candidate => candidate.phase === 'baseline' && checkName(candidate.input) === checkName(check.input)) : undefined;
+  if (previous && previous.result.exitCode !== null && !previous.result.cancelled && !previous.result.timedOut) {
+    if (!passed && checkPassed(previous)) return 'New failure';
+    if (!passed) return 'Failed before and after';
+    if (!checkPassed(previous)) return 'Now passing';
+  }
+  return passed ? 'Passed' : 'Failed';
+}
+
+let evidenceSignature;
+let reviewerText;
+function renderEvidence() {
+  const review = state.review;
+  const proposal = state.proposals.find(item => item.id === state.verification?.proposalId);
+  const evidence = state.evidence;
+  const plan = state.verification;
+  const signature = JSON.stringify([review, evidence, plan, proposal?.state, state.auxiliary, state.status]);
+  if (signature === evidenceSignature) return;
+  evidenceSignature = signature;
+  const report = $('review-report');
+  if (review && reviewerText !== JSON.stringify(review)) {
+    reviewerText = JSON.stringify(review);
+    const card = element('section', 'evidence-card');
+    card.append(element('strong', '', 'Independent review'), element('p', '', review.model), button('Reviewer session ↗', 'small-button', () => send('openReviewSession')));
+    if (review.stale) card.append(element('p', 'review-note', 'Hunk decisions changed after this review.'));
+    const body = element('div', 'message-body');
+    renderMessageContent(body, review.text || 'Waiting for reviewer output…');
+    card.append(body);
+    report.replaceChildren(card);
+  } else if (!review) {
+    reviewerText = undefined;
+    report.replaceChildren();
+  }
+  const output = $('verification-list');
+  const openChecks = new Set([...output.querySelectorAll('details[open]')].map(check => check.dataset.index));
+  output.replaceChildren();
+  if (plan && proposal) {
+    const card = element('section', 'evidence-card');
+    card.append(element('strong', '', 'Verification plan'), element('p', '', plan.inputs.map(checkName).join(' · ')));
+    if (proposal.state === 'pending') card.append(button(plan.baselineDone ? 'Baseline recorded' : 'Run baseline checks', 'small-button', () => send('runChecks', { proposalId: proposal.id, phase: 'baseline' }), !!state.auxiliary || !!plan.baselineDone));
+    if (proposal.state === 'applied') card.append(button(plan.afterDone ? 'Post-change checks recorded' : 'Run same checks', 'small-button', () => send('runChecks', { proposalId: proposal.id, phase: 'after' }), !!state.auxiliary || !!plan.afterDone));
+    output.append(card);
+  }
+  const checks = evidence?.checks ?? [];
+  for (const [index, check] of checks.entries()) {
+    const details = element('details', 'evidence-card check-output');
+    details.dataset.index = String(index);
+    details.open = openChecks.has(details.dataset.index);
+    const phase = { baseline: 'Baseline', after: 'After changes', agent: 'Agent check' }[check.phase];
+    const status = checkStatus(check, checks);
+    const summary = element('summary', 'check-summary');
+    summary.append(element('strong', '', `${phase} · ${checkName(check.input)}`), element('span', checkPassed(check) ? 'outcome-applied' : 'outcome-rejected', status));
+    details.append(summary, element('p', '', `Exit ${check.result.exitCode ?? 'unavailable'} · ${(check.durationMs / 1000).toFixed(1)}s`));
+    if (check.changedSource.length) details.append(element('p', 'review-note', `Detected source changes: ${check.changedSource.join(', ')}`));
+    if (check.result.truncated || check.detectionPartial) details.append(element('p', 'review-note', check.result.truncated ? 'Output truncated by the command runner.' : 'Source-change detection was partial.'));
+    const text = [check.result.stdout, check.result.stderr].filter(Boolean).join('\n');
+    if (text) details.append(element('pre', 'code-block-content', text.slice(0, 8000)));
+    details.append(button('Open captured output', 'small-button', () => send('showCheck', { index })));
+    output.append(details);
+  }
+  const result = $('run-evidence');
+  result.replaceChildren();
+  if (!evidence) return;
+  const card = element('section', 'forgeproof-card');
+  card.append(element('strong', 'forgeproof-title', 'ForgeProof'));
+  const after = checks.filter(check => check.phase !== 'baseline');
+  const edited = [...new Set(evidence.edits.flatMap(edit => edit.paths))];
+  const staged = state.proposals.filter(item => item.state === 'pending').flatMap(item => item.files.map(file => file.path));
+  if (staged.length) card.append(element('p', 'outcome-pending', `${new Set(staged).size} files staged for review`));
+  if (edited.length) card.append(element('p', 'outcome-applied', `${edited.length} files applied`));
+  if (after.length) card.append(element('p', '', `${after.filter(checkPassed).length} of ${after.length} executed checks passed`));
+  const stats = [];
+  if (evidence.finishedAt) stats.push(`${((evidence.finishedAt - evidence.startedAt) / 1000).toFixed(1)}s`);
+  stats.push(evidence.usage.measured ? `${evidence.usage.tokens.toLocaleString()} reported tokens` : 'Usage unavailable');
+  if (evidence.usage.estimatedCost !== undefined) stats.push(`≈ $${evidence.usage.estimatedCost.toFixed(4)}`);
+  if (evidence.stopReason) stats.push(evidence.stopReason);
+  card.append(element('p', 'review-note', stats.join(' · ')));
+  const files = element('div', 'forgeproof-file-list');
+  for (const file of edited) files.append(button(file, 'forgeproof-file-pill', () => send('openDiff', { path: file })));
+  card.append(files);
+  const actions = element('div', 'review-actions');
+  actions.append(button('Export receipt', 'small-button', () => send('exportEvidence')));
+  if (edited.length && evidence.finishedAt) actions.append(button('Prepare draft PR', 'small-button', () => send('draftPullRequest'), !!state.auxiliary));
+  card.append(actions);
+  result.append(card);
+}
+
+function renderContextEditor() {
+  const pane = $('context-editor');
+  if (pane.hidden) return;
+  const choices = $('context-picks');
+  $('context-add').disabled = $('context-refresh').disabled = $('symbol-graph').disabled = !!state.auxiliary || isRunning();
+  choices.replaceChildren();
+  for (const [key, label] of [['pins', 'Pinned'], ['excluded', 'Excluded']]) {
+    for (const file of draft[key]) {
+      choices.append(button(`${label} · ${file} ×`, 'small-button', () => {
+        draft[key] = draft[key].filter(item => item !== file);
+        refreshDraft();
+      }, !!state.auxiliary || isRunning()));
+    }
+  }
+  const list = $('draft-context-list');
+  list.replaceChildren();
+  if (!state.draftContext) return;
+  for (const chunk of state.draftContext.chunks) {
+    const card = element('div', 'context-chip');
+    card.append(element('strong', '', chunk.path), element('small', '', `${chunk.tokens.toLocaleString()} estimated units · ${chunk.reason}`));
+    const actions = element('div', 'review-actions');
+    actions.append(
+      button('Pin', 'small-button', () => setPin(chunk.path), draft.pins.includes(chunk.path) || !!state.auxiliary || isRunning()),
+      button('Remove', 'small-button', () => {
+        draft.pins = draft.pins.filter(file => file !== chunk.path);
+        draft.excluded = [...new Set([...draft.excluded, chunk.path])];
+        refreshDraft();
+      }, !!state.auxiliary || isRunning()),
+      button('Replace', 'small-button', () => { replacement = chunk.path; send('contextPick'); }, !!state.auxiliary || isRunning()),
+    );
+    card.append(actions);
+    list.append(card);
+  }
+}
+
+function statusLabel() {
+  if (state.retry) return `${state.retry.message} · ${Math.max(0, Math.ceil((state.retry.until - Date.now()) / 1000))}s`;
+  if (state.auxiliary) return state.auxiliary;
+  if (state.status === 'cancelled' && state.evidence?.stopReason) return state.evidence.stopReason;
+  return ({
+    running: 'Working through your repository…', connecting: 'Connecting to TrueForge…',
+    'awaiting-review': 'Review required', cancelling: 'Stopping and cleaning up…',
+    cancelled: 'Run stopped', completed: 'Task complete', failed: 'Needs attention',
+  })[state.status] || state.status;
+}
+
+const feed = document.querySelector('main');
+const nearEnd = () => feed.scrollHeight - feed.scrollTop - feed.clientHeight < 140;
+const scrollToEnd = () => feed.scrollTo({ top: feed.scrollHeight });
+let followFeed = true;
+let announcedStatus;
+function markJump() {
+  $('jump-latest').hidden = followFeed || nearEnd();
+}
+feed.addEventListener('scroll', () => { followFeed = nearEnd(); markJump(); }, { passive: true });
+$('jump-latest').addEventListener('click', () => { followFeed = true; scrollToEnd(); markJump(); });
+setInterval(() => { if (state.retry) $('status-text').textContent = statusLabel(); }, 300);
+
 function render() {
-  const busy = !['idle', 'completed', 'failed', 'cancelled'].includes(state.status);
+  const busy = isRunning() || !!state.auxiliary;
   
   if (busy && !prevBusy) {
     turnStartTime = Date.now();
@@ -680,7 +859,7 @@ function render() {
   $('model').title = state.model || 'Configure a model in TrueForge';
 
   // Update permissions pill
-  const pMode = state.permissionMode || 'auto';
+  const pMode = state.permissionMode || 'review';
   const pCfg = PERM_CONFIG[pMode] || PERM_CONFIG.auto;
   const pIcon = $('perm-icon');
   const pLabel = $('perm-label');
@@ -692,22 +871,19 @@ function render() {
   });
 
   $('hero').hidden = state.messages.length > 0;
-  $('run-status').hidden = state.status === 'idle';
+  $('run-status').hidden = state.status === 'idle' && !state.auxiliary;
   $('run-status').classList.toggle('busy', busy);
-  if (busy) {
-    const cur = getCurrentProcess(state, busy);
-    $('status-text').replaceChildren(createDynamicLoadingElement(cur.text));
+  $('run-status').dataset.runState = state.retry ? 'retry' : state.status;
+  if (isRunning() && !state.retry && !state.auxiliary) {
+    $('status-text').replaceChildren(createDynamicLoadingElement(getCurrentProcess(state, busy).text));
   } else {
-    $('status-text').textContent = ({
-      connecting: 'Connecting to TrueForge…',
-      'awaiting-review': 'Review required — waiting for your decision',
-      cancelling: 'Stopping and cleaning up…',
-      cancelled: 'Run stopped',
-      completed: 'Task complete',
-      failed: 'Needs attention'
-    })[state.status] || state.status;
+    $('status-text').textContent = statusLabel();
   }
+  const announce = state.retry?.message || statusLabel();
+  if (announce !== announcedStatus && announce !== 'idle') $('announce').textContent = announce;
+  announcedStatus = announce;
   $('stop').hidden = !busy; $('send').disabled = busy; $('prompt').disabled = busy;
+  $('workflow').disabled = $('preview-context').disabled = $('isolated').disabled = busy;
   $('session').hidden = !state.sessionId;
   const connectBtn = $('connect');
   if (connectBtn) {
@@ -791,111 +967,42 @@ function render() {
     }
   }
 
-  transcript.replaceChildren(...newNodes);
-
-  const feed = document.querySelector('main');
-  if (transcript.scrollHeight > oldHeight && state.status === 'running' && feed.scrollHeight - feed.scrollTop - feed.clientHeight < 160) {
-    requestAnimationFrame(() => feed.scrollTo({ top: feed.scrollHeight, behavior: 'smooth' }));
+  const currentNodes = Array.from(transcript.children).filter(node => !node.classList.contains('impact-radar-card'));
+  transcript.querySelectorAll(':scope > .impact-radar-card').forEach(node => node.remove());
+  if (newNodes.length !== currentNodes.length || newNodes.some((node, index) => node !== currentNodes[index])) {
+    transcript.replaceChildren(...newNodes);
   }
 
-  // Handle Needs Attention warning auto-dismissal after 5 seconds
-  if (state.error) {
-    if (state.error !== renderedError) {
-      renderedError = state.error;
-      dismissedError = null;
-      if (errorTimer) {
-        clearTimeout(errorTimer);
-        errorTimer = null;
-      }
-      $('error').hidden = false;
-      $('error-text').textContent = state.error;
-      requestAnimationFrame(() => $('error').scrollIntoView({ block: 'nearest', behavior: 'auto' }));
-      errorTimer = setTimeout(() => {
-        $('error').hidden = true;
-        dismissedError = state.error;
-        errorTimer = null;
-      }, 5000);
-    } else if (dismissedError === state.error) {
-      $('error').hidden = true;
-    } else {
-      $('error').hidden = false;
-      $('error-text').textContent = state.error;
-    }
-  } else {
-    if (errorTimer) {
-      clearTimeout(errorTimer);
-      errorTimer = null;
-    }
-    renderedError = null;
-    dismissedError = null;
-    $('error').hidden = true;
-    $('error-text').textContent = '';
-  }
+  if (transcript.scrollHeight > oldHeight && state.status === 'running' && followFeed) requestAnimationFrame(scrollToEnd);
+  requestAnimationFrame(markJump);
+
+  $('error').hidden = !state.error;
+  $('error-text').textContent = state.error || '';
+  if (state.error && state.error !== renderedError) requestAnimationFrame(() => $('error').scrollIntoView({ block: 'nearest', behavior: 'auto' }));
+  renderedError = state.error || null;
 
   $('contexts').hidden = !state.context;
   if (state.context) {
     const c = state.context;
+    const costs = new Map();
+    for (const chunk of c.chunks) costs.set(chunk.path, (costs.get(chunk.path) ?? 0) + (chunk.tokens ?? 0));
     $('budget-label').textContent = `${c.usedTokens.toLocaleString()} / ${c.budgetTokens.toLocaleString()} tokens`;
     $('budget-index').textContent = c.selectionOnly ? '1 file' : `${c.indexedFiles} files`;
     $('meter-bar').style.width = `${Math.min(100, c.usedTokens / Math.max(1, c.budgetTokens) * 100)}%`;
     $('source-list').replaceChildren(...c.chunks.map(chunk => {
       const card = element('div', 'context-chip');
-      const btn = button('', 'context-file-link', () => send('openSource', { path: chunk.path, line: chunk.startLine }));
-      btn.innerHTML = `<span class="icon-inline">${SVG_ICONS.file}</span> ${chunk.path} (L${chunk.startLine}–${chunk.endLine})`;
-      card.append(btn);
+      card.append(
+        button(`${chunk.path} (L${chunk.startLine}–${chunk.endLine})`, 'context-file-link', () => send('openSource', { path: chunk.path, line: chunk.startLine })),
+        element('small', 'context-cost', `${costs.get(chunk.path).toLocaleString()} estimated units for this file`),
+        element('p', 'context-reason', chunk.reason),
+      );
       return card;
     }));
   }
 
-  $('review-list').replaceChildren(...state.proposals.map(proposal => {
-    const section = element('section', 'review');
-    const head = element('div', 'review-header');
-    head.append(element('strong', '', 'Review changes'), element('small', '', `${proposal.files.length} files · ${proposal.state}`));
-
-    if (proposal.state === 'pending') {
-      head.append(button('Accept all', 'small-button accepted', () => send('acceptAllHunks', { proposalId: proposal.id })));
-    }
-    section.append(head);
-
-    const impactResults = Array.isArray(state.impactResults) ? state.impactResults : [];
-    for (const file of proposal.files) {
-      const impact = impactResults.find(r => r.targetFile === file.path);
-      if (impact) {
-        section.append(createImpactRadarCard(impact));
-      }
-
-      const fh = element('div', 'file-head', file.path);
-      fh.append(button('Open diff ↗', '', () => send('preview', { proposalId: proposal.id, path: file.path })));
-      section.append(fh);
-
-      file.hunks.forEach((hunk, i) => {
-        const line = (file.original || '').slice(0, hunk.start).split('\n').length;
-        const row = element('div', 'hunk');
-        const label = element('div', 'hunk-label');
-        label.append(element('span', '', `HUNK ${i + 1} · LINE ${line}`), element('span', '', hunk.decision));
-        row.append(label);
-        if (hunk.before) row.append(element('pre', 'before', hunk.before));
-        if (hunk.after) row.append(element('pre', 'after', hunk.after));
-        const actions = element('div', 'hunk-actions');
-        actions.append(
-          button('Reject', `small-button ${hunk.decision === 'reject' ? 'rejected' : ''}`, () => send('decide', { proposalId: proposal.id, hunkId: hunk.id, decision: 'reject' }), proposal.state !== 'pending'),
-          button('Accept', `small-button ${hunk.decision === 'accept' ? 'accepted' : ''}`, () => send('decide', { proposalId: proposal.id, hunkId: hunk.id, decision: 'accept' }), proposal.state !== 'pending')
-        );
-        row.append(actions);
-        section.append(row);
-      });
-    }
-
-    const awaiting = state.approvals.some(a => a.name === 'apply_proposal' && a.args.proposalId === proposal.id);
-    const pending = proposal.files.some(f => f.hunks.some(h => h.decision === 'pending'));
-    const accepted = proposal.files.some(f => f.hunks.some(h => h.decision === 'accept'));
-    const footer = element('div', 'review-footer');
-    footer.append(button(accepted ? 'Apply selected hunks' : 'Finish review', 'primary wide', () => send('apply', { proposalId: proposal.id }), !awaiting || pending || proposal.state !== 'pending'));
-    if (proposal.state === 'pending') footer.append(button('Reject all remaining', 'mention-button', () => send('rejectRemaining', { proposalId: proposal.id })));
-    footer.append(element('div', 'review-note', awaiting ? 'Your choices are applied through TrueForge approval.' : proposal.state === 'pending' ? 'Waiting for the agent to request the apply checkpoint.' : 'Review decisions are preserved.'));
-    section.append(footer);
-    return section;
-  }));
+  renderReview();
+  renderEvidence();
+  renderContextEditor();
 
   // Render command checks with modern card styling
   $('command-list').replaceChildren(...state.approvals.filter(a => a.name === 'run_command').map(a => {
@@ -992,9 +1099,16 @@ function renderHistoryItems() {
     actions.append(delBtn);
 
     item.append(icon, info, actions);
-    item.addEventListener('click', () => {
+    const openConversation = () => {
       closeAllDrawers();
       send('switchConversation', { id: conv.id });
+    };
+    item.addEventListener('click', openConversation);
+    item.addEventListener('keydown', event => {
+      if (event.target === item && (event.key === 'Enter' || event.key === ' ')) {
+        event.preventDefault();
+        openConversation();
+      }
     });
     return item;
   }));
@@ -1127,12 +1241,14 @@ function saveChangeGuard() {
   });
 }
 
+let previousReproFields;
 function renderRepro(state) {
   const panel = $('repro-panel');
   if (!panel) return;
   const session = state.reproSession;
   if (!session) {
     panel.hidden = true;
+    previousReproFields = undefined;
     return;
   }
   panel.hidden = false;
@@ -1140,15 +1256,21 @@ function renderRepro(state) {
   const stackInput = $('repro-stack-input');
   const fileInput = $('repro-file-input');
   const headerText = $('repro-header-text');
-  if (errInput && document.activeElement !== errInput) errInput.value = session.errorText || '';
-  if (stackInput && document.activeElement !== stackInput) stackInput.value = session.stackTrace || '';
-  if (fileInput && document.activeElement !== fileInput) fileInput.value = session.affectedFile || '';
+  const fields = [session.errorText, session.stackTrace, session.affectedFile];
+  [errInput, stackInput, fileInput].forEach((input, index) => {
+    if (input && (!previousReproFields || fields[index] !== previousReproFields[index])) input.value = fields[index] || '';
+    if (input) input.disabled = session.phase === 'red_running';
+  });
+  previousReproFields = fields;
+  $('repro-submit-btn').disabled = $('repro-quick-pick').disabled = session.phase === 'red_running';
 
   if (headerText) {
     if (session.phase === 'red_running') {
       headerText.textContent = 'Repro-to-Regression (Running Red-Green Protocol…)';
     } else if (session.phase === 'done') {
-      headerText.textContent = 'Repro-to-Regression (Permanent Test Verified)';
+      headerText.textContent = 'Repro-to-Regression (Review check results)';
+    } else if (session.phase === 'incomplete') {
+      headerText.textContent = 'Repro-to-Regression (Run incomplete)';
     } else {
       headerText.textContent = 'Repro-to-Regression';
     }
@@ -1159,12 +1281,15 @@ function createImpactRadarCard(res) {
   const card = element('div', `impact-radar-card ${res.riskLevel}`);
   const hdr = element('div', 'impact-header');
   const title = element('div', 'impact-title');
-  title.innerHTML = `<span class="icon-inline">${SVG_ICONS.zap}</span> Impact Radar · <code>${res.targetFile}</code>`;
+  const icon = element('span', 'icon-inline');
+  icon.innerHTML = SVG_ICONS.zap;
+  title.append(icon, document.createTextNode(' Impact Radar · '), element('code', '', res.targetFile));
   const badge = element('span', `impact-badge ${res.riskLevel}`, `${res.riskLevel.toUpperCase()} RISK`);
   hdr.append(title, badge);
   card.append(hdr);
 
   const body = element('div', 'impact-body');
+  if (res.partial) body.append(element('p', 'impact-subhead', 'Some workspace files were outside the scan or could not be read.'));
   if (res.consumers.length > 0) {
     const cHead = element('div', 'impact-subhead');
     cHead.innerHTML = `<span class="icon-inline">${SVG_ICONS.alertTriangle}</span> ${res.consumers.length} module${res.consumers.length === 1 ? '' : 's'} depend on this change:`;
@@ -1178,7 +1303,7 @@ function createImpactRadarCard(res) {
     body.append(list);
   } else {
     const iso = element('div', 'impact-subhead');
-    iso.innerHTML = `<span class="icon-inline">${SVG_ICONS.check}</span> Isolated module: no downstream consumers identified in workspace.`;
+    iso.textContent = 'No downstream consumers found in the scanned files.';
     body.append(iso);
   }
 
@@ -1210,23 +1335,59 @@ function renderImpactRadarCards(transcript, state) {
 }
 
 const promptInput = $('prompt');
+const workflow = $('workflow');
+promptInput.value = typeof saved.prompt === 'string' ? saved.prompt : '';
+workflow.value = ['build', 'ask', 'plan'].includes(saved.workflow) ? saved.workflow : 'build';
+function storeDraft() { vscode.setState?.({ demo: demoMode, prompt: promptInput.value, workflow: workflow.value }); }
 function adjustPromptHeight() {
   promptInput.style.height = 'auto';
-  promptInput.style.height = `${Math.min(140, Math.max(38, promptInput.scrollHeight))}px`;
+  promptInput.style.height = `${Math.min(200, Math.max(52, promptInput.scrollHeight))}px`;
 }
-
-function updatePlanBtnState() {
-  const prompt = $('prompt');
-  const planBtn = $('plan-btn');
-  if (prompt && planBtn) {
-    const isPlan = prompt.value.trim().startsWith('/plan');
-    planBtn.classList.toggle('active', isPlan);
+function renderMentions() {
+  const tray = $('mention-chips');
+  const mentions = [...promptInput.value.matchAll(/@(?:file|folder|symbol)(?:\([^\r\n)]+\)|:(?:"[^"\r\n]+"|[^\s,;]+))|@[\w.\-]+(?:\/[\w.\-]+)+/g)];
+  tray.hidden = !mentions.length;
+  tray.replaceChildren(...mentions.map(match => {
+    const chip = button(`${match[0]} ×`, 'small-button', () => {
+      promptInput.setRangeText('', match.index, match.index + match[0].length, 'start');
+      refreshComposer();
+      promptInput.focus();
+    });
+    chip.type = 'button';
+    chip.setAttribute('aria-label', `Remove ${match[0]}`);
+    return chip;
+  }));
+}
+function refreshComposer() { adjustPromptHeight(); renderMentions(); storeDraft(); }
+function syncWorkflow() {
+  $('send').textContent = ({ ask: 'Ask ↗', plan: 'Plan ↗', build: 'Build ↗' })[workflow.value];
+  storeDraft();
+}
+workflow.addEventListener('change', syncWorkflow);
+function refreshDraft() {
+  renderContextEditor();
+  if (!state.auxiliary && !isRunning()) send('contextPreview', { prompt: promptInput.value.trim(), context: draft });
+}
+function setPin(file) {
+  if (replacement && replacement !== file) {
+    draft.pins = draft.pins.filter(item => item !== replacement);
+    draft.excluded = [...new Set([...draft.excluded, replacement])];
   }
+  replacement = undefined;
+  draft.excluded = draft.excluded.filter(item => item !== file);
+  draft.pins = [...new Set([...draft.pins, file])].slice(0, 20);
+  refreshDraft();
 }
+$('preview-context').addEventListener('click', () => {
+  $('context-editor').hidden = !$('context-editor').hidden;
+  if (!$('context-editor').hidden) refreshDraft();
+});
+$('context-refresh').addEventListener('click', refreshDraft);
+$('context-add').addEventListener('click', () => { replacement = undefined; send('contextPick'); });
+$('symbol-graph').addEventListener('change', event => { draft.semantic = event.target.checked; refreshDraft(); });
 
 promptInput.addEventListener('input', () => {
-  adjustPromptHeight();
-  updatePlanBtnState();
+  refreshComposer();
 
   const val = promptInput.value;
   const cursor = promptInput.selectionStart ?? val.length;
@@ -1254,17 +1415,27 @@ promptInput.addEventListener('input', () => {
 $('form').addEventListener('submit', event => {
   event.preventDefault();
   const prompt = $('prompt').value.trim();
-  if (prompt) {
+  if (prompt && !isRunning() && !state.auxiliary) {
+    const limits = Object.fromEntries(['seconds', 'tokens', 'cost', 'rate'].map(key => [key, Number($(`limit-${key}`).value || 0)]));
+    if (limits.cost && !limits.rate) {
+      $('run-options').open = true;
+      $('limit-rate').setCustomValidity('Enter an estimated price per million tokens.');
+      $('limit-rate').reportValidity();
+      return;
+    }
     hideSlashMenu();
     hideMentionMenu();
     turnStartTime = Date.now();
     lastCompletedDuration = null;
-    send('run', { prompt });
+    followFeed = true;
+    send('run', { prompt, workflow: workflow.value, context: draft, limits });
     $('prompt').value = '';
-    adjustPromptHeight();
-    updatePlanBtnState();
+    $('context-editor').hidden = true;
+    refreshComposer();
   }
 });
+$('limit-rate').addEventListener('input', () => $('limit-rate').setCustomValidity(''));
+$('limit-cost').addEventListener('input', () => $('limit-rate').setCustomValidity(''));
 
 $('prompt').addEventListener('keydown', e => {
   if (slashMenu && !slashMenu.hidden && filteredSlashCommands.length > 0) {
@@ -1513,17 +1684,17 @@ function selectSlashCommand(cmdObj) {
   if (!cmdObj) return;
   if (cmdObj.action === 'execute') {
     promptInput.value = '';
-    adjustPromptHeight();
+    refreshComposer();
     turnStartTime = Date.now();
     lastCompletedDuration = null;
     send('run', { prompt: cmdObj.cmd });
   } else if (cmdObj.action === 'repro') {
     promptInput.value = '';
-    adjustPromptHeight();
+    refreshComposer();
     send('startRepro');
   } else {
     promptInput.value = `${cmdObj.cmd} `;
-    adjustPromptHeight();
+    refreshComposer();
     promptInput.focus();
     promptInput.selectionStart = promptInput.selectionEnd = promptInput.value.length;
   }
@@ -1541,7 +1712,7 @@ function selectMentionOption(kind) {
     promptInput.value = textBefore.slice(0, atIndex) + textAfter;
     promptInput.selectionStart = promptInput.selectionEnd = atIndex;
   }
-  adjustPromptHeight();
+  refreshComposer();
   send('mention', { kind });
 }
 
@@ -1632,7 +1803,7 @@ if (historyBtn) {
 const drawerClose = $('drawer-close');
 if (drawerClose) drawerClose.addEventListener('click', closeAllDrawers);
 const drawerNewChat = $('drawer-new-chat');
-if (drawerNewChat) drawerNewChat.addEventListener('click', () => { closeAllDrawers(); send('newChat'); });
+if (drawerNewChat) drawerNewChat.addEventListener('click', () => { closeAllDrawers(); $('new-chat').click(); });
 const historySearch = $('history-search');
 if (historySearch) {
   historySearch.addEventListener('input', e => {
@@ -1759,6 +1930,21 @@ document.addEventListener('keydown', e => {
 });
 
 $('stop').addEventListener('click', () => send('stop'));
+$('sticky-stop').addEventListener('click', () => send('stop'));
+$('next-hunk').addEventListener('click', nextHunk);
+$('sticky-apply').addEventListener('click', () => { const active = activeReview(); if (active) send('apply', { proposalId: active.id }); });
+document.addEventListener('keydown', event => {
+  const active = activeReview();
+  if (!event.altKey || event.ctrlKey || event.metaKey || !active || state.auxiliary || event.target.closest?.('textarea,input,select')) return;
+  const key = event.key.toLowerCase();
+  if (key === 'enter' && !$('sticky-apply').disabled) $('sticky-apply').click();
+  else if (key === 'n') nextHunk();
+  else if (key === 'a' || key === 'r') {
+    const pending = document.activeElement.closest?.('.hunk') ?? document.querySelector('.hunk[data-decision="pending"]');
+    if (pending?.dataset.proposalId === active.id) send('decide', { proposalId: active.id, hunkId: pending.dataset.hunkId, decision: key === 'a' ? 'accept' : 'reject' });
+  } else return;
+  event.preventDefault();
+});
 $('model').addEventListener('click', () => send('setup'));
 $('connect').addEventListener('click', () => send('setup'));
 $('session').addEventListener('click', () => send('session'));
@@ -1769,30 +1955,32 @@ if (sessionBtnEl) {
     send('session');
   });
 }
-const planBtn = $('plan-btn');
-if (planBtn) {
-  planBtn.addEventListener('click', () => {
-    const prompt = $('prompt');
-    if (!prompt) return;
-    if (prompt.value.startsWith('/plan')) {
-      prompt.value = prompt.value.replace(/^\/plan\s*/, '');
-    } else {
-      prompt.value = `/plan ${prompt.value.trim()}`.trim() + ' ';
-    }
-    adjustPromptHeight();
-    updatePlanBtnState();
-    prompt.focus();
-  });
+$('isolated').addEventListener('click', () => { closeAllDrawers(); send('isolated'); });
+function applyDemoMode() {
+  document.body.classList.toggle('demo-mode', demoMode);
+  $('demo-mode').setAttribute('aria-pressed', String(demoMode));
+  storeDraft();
 }
+$('demo-mode').addEventListener('click', () => { demoMode = !demoMode; applyDemoMode(); closeAllDrawers(); });
 $('file-mention').addEventListener('click', () => send('mention', { kind: 'file' }));
 const folderMention = $('folder-mention');
 if (folderMention) folderMention.addEventListener('click', () => send('mention', { kind: 'folder' }));
 $('symbol-mention').addEventListener('click', () => send('mention', { kind: 'symbol' }));
-$('new-chat').addEventListener('click', () => send('newChat'));
+$('new-chat').addEventListener('click', () => {
+  if (!isRunning() && !state.auxiliary) {
+    draft.pins = []; draft.excluded = []; draft.semantic = false;
+    replacement = undefined;
+    $('symbol-graph').checked = false;
+    $('context-editor').hidden = true;
+    promptInput.value = '';
+    refreshComposer();
+  }
+  send('newChat');
+});
 for (const card of document.querySelectorAll('[data-prompt]')) {
   card.addEventListener('click', () => {
     $('prompt').value = card.dataset.prompt;
-    adjustPromptHeight();
+    refreshComposer();
     $('prompt').focus();
   });
 }
@@ -1803,9 +1991,14 @@ window.addEventListener('message', event => {
     render();
   } else if (event.data.type === 'insertMention') {
     $('prompt').value += `${$('prompt').value ? ' ' : ''}${event.data.text} `;
-    adjustPromptHeight();
+    refreshComposer();
     $('prompt').focus();
+  } else if (event.data.type === 'pinContext' && typeof event.data.path === 'string') {
+    setPin(event.data.path);
   }
 });
 
+syncWorkflow();
+applyDemoMode();
+refreshComposer();
 send('ready');

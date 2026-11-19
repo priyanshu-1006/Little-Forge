@@ -1,12 +1,19 @@
 import { build, context } from 'esbuild';
-import { mkdir, copyFile, readFile, writeFile, readdir } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, readdir } from 'node:fs/promises';
 import path from 'node:path';
 await mkdir('dist', { recursive: true });
-const options = { entryPoints: ['src/extension.ts'], bundle: true, platform: 'node', target: 'node22', format: 'cjs', outfile: 'dist/extension.cjs', external: ['vscode'], sourcemap: true, logLevel: 'info', legalComments: 'eof', define: { navigator: 'undefined' }, metafile: true };
-if (process.argv.includes('--watch')) { const ctx = await context(options); await ctx.watch(); }
+const options = [
+  { entryPoints: ['src/extension.ts'], bundle: true, platform: 'node', target: 'node22', format: 'cjs', outfile: 'dist/extension.cjs', external: ['vscode'], sourcemap: true, logLevel: 'info', legalComments: 'eof', define: { navigator: 'undefined' }, metafile: true },
+  { entryPoints: ['src/ui.js', 'src/ui.css'], bundle: true, platform: 'browser', target: 'es2022', format: 'iife', outdir: 'dist', logLevel: 'info', legalComments: 'eof', metafile: true }
+];
+if (process.argv.includes('--watch')) {
+  const contexts = await Promise.all(options.map(config => context(config)));
+  await Promise.all(contexts.map(ctx => ctx.watch()));
+}
 else {
-  const result = await build(options);
-  const packages = new Set(Object.keys(result.metafile.inputs).filter(p => p.includes('node_modules/')).map(p => {
+  const results = await Promise.all(options.map(config => build(config)));
+  const inputs = results.flatMap(result => Object.keys(result.metafile.inputs));
+  const packages = new Set(inputs.filter(p => p.includes('node_modules/')).map(p => {
     const local = p.slice(p.lastIndexOf('node_modules/') + 13).split('/');
     return path.join('node_modules', ...(local[0].startsWith('@') ? local.slice(0, 2) : local.slice(0, 1)));
   }));
@@ -20,5 +27,3 @@ else {
   }
   await writeFile('dist/THIRD_PARTY_NOTICES.txt', notices);
 }
-await copyFile('src/ui.js', 'dist/ui.js');
-await copyFile('src/ui.css', 'dist/ui.css');

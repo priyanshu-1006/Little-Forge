@@ -9,8 +9,8 @@ let html = source.match(/view\.webview\.html = `([\s\S]*?)`;/)?.[1];
 if (!html) throw new Error('Cannot locate the extension HTML template.');
 html = html.replaceAll('${nonce}', 'ui-smoke').replaceAll('${view.webview.cspSource}', "'self'").replaceAll("${uri('ui.css')}", '/ui.css').replaceAll("${uri('ui.js')}", '/ui.js');
 html = html.replace('<script nonce="ui-smoke" src=', `<script nonce="ui-smoke">window.__actions=[]; window.acquireVsCodeApi=()=>({postMessage:m=>window.__actions.push(m)});</script><script nonce="ui-smoke" src=`);
-const css = `:root{--vscode-sideBar-background:#12171d;--vscode-editor-background:#1a2028;--vscode-foreground:#e4eaf0;--vscode-descriptionForeground:#9caaba;--vscode-widget-border:#303c48;--vscode-font-family:'Segoe UI',system-ui;--vscode-editor-font-family:Consolas,monospace}\n` + await readFile('src/ui.css', 'utf8');
-const js = await readFile('src/ui.js', 'utf8');
+const css = `:root{--vscode-sideBar-background:#12171d;--vscode-editor-background:#1a2028;--vscode-foreground:#e4eaf0;--vscode-descriptionForeground:#9caaba;--vscode-widget-border:#303c48;--vscode-font-family:'Segoe UI',system-ui;--vscode-editor-font-family:Consolas,monospace}\n` + await readFile('dist/ui.css', 'utf8');
+const js = await readFile('dist/ui.js', 'utf8');
 const server = createServer((req, res) => { const type = req.url === '/ui.css' ? 'text/css' : req.url === '/ui.js' ? 'text/javascript' : 'text/html'; res.writeHead(200, { 'Content-Type': type }); res.end(req.url === '/ui.css' ? css : req.url === '/ui.js' ? js : html); });
 await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
 const address = server.address();
@@ -31,6 +31,79 @@ try {
   await page.locator('#form').evaluate(form => form.requestSubmit());
   assert.equal(await page.evaluate(() => window.__actions.filter(a=>a.type==='run').length),1);
   assertions.push('Suggestion and submit send a typed request without embedding executable source.');
+
+  const formatted = [
+    '## Forge&#x20;results',
+    '',
+    '**Ready** to run `pytest`. See the [Flask docs](https://flask.palletsprojects.com/).',
+    '',
+    '3. Review the patch',
+    '   - Check the source',
+    '   - Check the tests',
+    '',
+    '> Review before applying.',
+    '',
+    '| Check | Result |',
+    '| --- | ---: |',
+    '| CLI tests | Passed |',
+    '',
+    '~~~python',
+    'print("<tag> &amp;")',
+    '~~~',
+    '',
+    '<img src="/tracking" onerror="window.__unsafe = true">',
+    '',
+    '![Image label](/tracking) [Open command](command:workbench.action.reloadWindow)',
+    '',
+    '[Script link](javascript:alert%281%29)',
+  ].join('\n');
+  const markdownState = {
+    ...base, status: 'completed', messages: [{role: 'assistant', text: formatted}],
+  };
+  await page.evaluate(state => window.postMessage({type:'state',state},'*'), markdownState);
+  const reply = page.locator('.message.assistant .message-body');
+  await reply.getByRole('heading', {name: 'Forge results', level: 2}).waitFor();
+  assert.equal(await reply.locator('strong').textContent(), 'Ready');
+  assert.equal(await reply.locator('code.inline-code').textContent(), 'pytest');
+  assert.equal(await reply.locator('ol').getAttribute('start'), '3');
+  assert.equal(await reply.locator('ol ul li').count(), 2);
+  assert.equal(await reply.locator('blockquote').innerText(), 'Review before applying.');
+  assert.equal(await reply.getByRole('cell', {name: 'Passed'}).evaluate(el => getComputedStyle(el).textAlign), 'right');
+  assert.equal(await reply.getByRole('link', {name: 'Flask docs'}).getAttribute('href'), 'https://flask.palletsprojects.com/');
+  assert.equal(await reply.locator('a').count(), 1);
+  assert.equal(await reply.locator('img').count(), 0);
+  assert.match(await reply.textContent(), /Image label/);
+  assert.match(await reply.textContent(), /<img src="\/tracking"/);
+  assert.equal(await reply.locator('pre code').textContent(), 'print("<tag> &amp;")\n');
+  assert.equal(await reply.locator('pre .hljs-string').textContent(), '"<tag> &amp;"');
+  await page.evaluate(() => {
+    Object.defineProperty(navigator, 'clipboard', {
+      value: { writeText: async text => { window.__copiedCode = text; } },
+    });
+  });
+  await reply.getByRole('button', {name: 'Copy code'}).click();
+  await reply.getByText('Copied', {exact: true}).waitFor();
+  assert.equal(await page.evaluate(() => window.__copiedCode), 'print("<tag> &amp;")\n');
+  await page.screenshot({path: 'test-results/ui/markdown-reply.png', fullPage: true});
+  assertions.push('Assistant Markdown renders structured blocks, decodes prose entities, copies literal code and keeps active model HTML, images and command links inert.');
+
+  const streamed = {
+    ...base, status: 'running',
+    messages: [{role: 'assistant', text: '## Streaming\n\n```python\n' + 'x'.repeat(360)}],
+  };
+  await page.setViewportSize({width: 300, height: 1100});
+  await page.evaluate(state => window.postMessage({type:'state',state},'*'), streamed);
+  await reply.getByRole('heading', {name: 'Streaming'}).waitFor();
+  assert.equal(await reply.locator('pre code').textContent(), 'x'.repeat(360));
+  assert.equal(await reply.locator('pre').evaluate(el => el.scrollWidth > el.clientWidth), true);
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+  streamed.messages[0].text += '\n```\n\n**Done.**';
+  await page.evaluate(state => window.postMessage({type:'state',state},'*'), streamed);
+  await reply.getByText('Done.', {exact: true}).waitFor();
+  assert.equal(await reply.locator('pre code').textContent(), 'x'.repeat(360) + '\n');
+  await page.setViewportSize({width: 420, height: 1100});
+  assertions.push('An unfinished streamed code fence renders and scrolls locally, then the closing fence restores normal prose.');
+
   const proposal = { id:'fixture', runId:'fixture', createdAt:0, state:'pending', files:[{path:'src/example.ts',original:'a\nb\nc\n',proposed:'A\nb\nC\n',baseHash:'fixture',hunks:[{id:'h1',start:0,end:1,before:'a',after:'A',decision:'pending'},{id:'h2',start:4,end:5,before:'c',after:'C',decision:'pending'}]}] };
   const state = {...base,status:'awaiting-review',connected:true,model:'configured/provider',messages:[{role:'user',text:'Review UI fixture'},{role:'assistant',text:'<img src=x onerror="window.__unsafe=true">'}],proposals:[proposal],approvals:[{name:'apply_proposal',args:{proposalId:'fixture'},toolCallId:'call',threadId:'main'}]};
   await page.evaluate(state => window.postMessage({type:'state',state},'*'),state);
@@ -123,7 +196,7 @@ try {
   // Test 3: Collapsible Tools Sidebar Drawer
   await page.locator('#tools-toggle-btn').click();
   await page.locator('#tools-sidebar').waitFor({ state: 'visible' });
-  assert.equal(await page.locator('#tools-sidebar button').count(), 5); // close + 4 tools
+  assert.equal(await page.locator('#tools-sidebar button').count(), 7);
   // Click Signals inside tools sidebar
   await page.locator('#tools-sidebar #signals-btn').click();
   await page.locator('#signals-drawer').waitFor({ state: 'visible' });
@@ -155,7 +228,117 @@ try {
   await page.screenshot({ path: 'test-results/ui/responsive-narrow.png', fullPage: false });
   assertions.push('Model, review, chats, and new chat controls remain non-overlapping, balanced, and responsive across narrow and expanded widths.');
 
+  const reviewState = structuredClone(state);
+  reviewState.proposals[0].files[0].hunks[1].decision = 'pending';
+  await page.evaluate(state => window.postMessage({type:'state',state},'*'), reviewState);
+  await page.getByText('1 accepted · 0 rejected · 1 pending').first().waitFor();
+  await page.getByRole('button', {name: 'Next hunk'}).click();
+  assert.equal(await page.evaluate(() => document.activeElement.dataset.hunkId), 'h2');
+  await page.keyboard.press('Alt+r');
+  assert.equal(await page.evaluate(() => window.__actions.at(-1).decision), 'reject');
+  assert.equal(await page.locator('#sticky-apply').isDisabled(), true);
+  const stale = { ...reviewState, stale: { proposalId: 'fixture', paths: ['src/example.ts'] } };
+  await page.evaluate(state => window.postMessage({type:'state',state},'*'), stale);
+  await page.getByRole('button', {name: 'Refresh proposal'}).click();
+  assert.equal(await page.evaluate(() => window.__actions.at(-1).type), 'refreshStale');
+  assertions.push('Sticky review navigation, keyboard decisions, and stale refresh emit the correct actions.');
+
+  const commands = { task: 'pytest', args: ['-q', 'tests/test_cli.py'] };
+  const result = exitCode => ({exitCode, stdout: `command exit ${exitCode}`, stderr: '', cleanupConfirmed: true});
+  const proofState = {
+    ...base, status: 'completed',
+    messages: [{role:'assistant',text:'Read [example source](src/example.ts#L12).\n\n~~~markdown\n## Preview title\n~~~'}],
+    evidence: { id:'fixture', workflow:'build', startedAt:1, finishedAt:1500, sessions:[], usage:{tokens:200,measured:true}, edits:[{proposalId:'fixture',checkpointId:'receipt',paths:['src/example.ts']}], checks:[
+      {input:commands,phase:'baseline',durationMs:40,result:result(1),changedSource:[]},
+      {input:commands,phase:'after',durationMs:55,result:result(0),changedSource:[]},
+      {input:{task:'git-diff-check'},phase:'agent',durationMs:23,result:result(1),changedSource:[]},
+    ]},
+  };
+  await page.evaluate(state => window.postMessage({type:'state',state},'*'), proofState);
+  await page.getByText('1 of 2 executed checks passed', {exact:true}).waitFor();
+  await page.getByText('Now passing', {exact:true}).click();
+  assert.equal(await page.getByText('command exit 0', {exact:true}).isVisible(), true);
+  await page.getByRole('link', {name:'example source'}).click();
+  assert.deepEqual(await page.evaluate(() => window.__actions.at(-1)), {type:'openSource',path:'src/example.ts',line:12});
+  await page.getByRole('button', {name:'Preview',exact:true}).click();
+  await page.getByRole('heading', {name:'Preview title'}).waitFor();
+  await page.getByRole('button', {name:'Collapse',exact:true}).click();
+  assert.equal(await page.getByRole('heading', {name:'Preview title'}).isVisible(), false);
+  await page.getByRole('button', {name:'Expand',exact:true}).click();
+  await page.getByRole('heading', {name:'Preview title'}).waitFor();
+  await page.locator('.reply-copy > summary').last().click();
+  await page.getByRole('button', {name:'Plain text',exact:true}).click();
+  assert.match(await page.evaluate(() => window.__copiedCode), /^Read example source/);
+  await page.getByRole('button', {name:'Export receipt'}).click();
+  assert.equal(await page.evaluate(() => window.__actions.at(-1).type), 'exportEvidence');
+  assertions.push('Actual check results drive proof and baseline comparisons; citations, code preview, plain-copy and receipt export use the expected controls.');
+
+  await page.getByRole('combobox', {name:'Workflow'}).selectOption('plan');
+  await page.locator('#prompt').fill('Review @file(src/example.ts) for edge cases');
+  await page.getByRole('button', {name:'Remove @file(src/example.ts)'}).click();
+  assert.equal((await page.locator('#prompt').inputValue()).includes('@file'), false);
+  await page.getByRole('button', {name:'Edit context'}).click();
+  assert.equal(await page.evaluate(() => window.__actions.at(-1).type), 'contextPreview');
+  const draftContext = { chunks:[{path:'src/example.ts',reason:'Related implementation',tokens:279,startLine:1,endLine:7}], usedTokens:279, budgetTokens:5000, indexedFiles:1 };
+  await page.evaluate(state => window.postMessage({type:'state',state},'*'), {...proofState,draftContext});
+  await page.getByRole('button', {name:'Pin',exact:true}).click();
+  assert.deepEqual(await page.evaluate(() => window.__actions.at(-1).context.pins), ['src/example.ts']);
+  await page.locator('#form').evaluate(form => form.requestSubmit());
+  const planRequest = await page.evaluate(() => window.__actions.at(-1));
+  assert.equal(planRequest.workflow,'plan');
+  assert.deepEqual(planRequest.context.pins,['src/example.ts']);
+  await page.locator('#new-chat').click();
+  await page.locator('#prompt').fill('A clean new request');
+  await page.locator('#form').evaluate(form => form.requestSubmit());
+  assert.deepEqual(await page.evaluate(() => window.__actions.at(-1).context.pins), []);
+  await page.locator('#tools-toggle-btn').click();
+  await page.getByRole('button', {name:'Demo mode'}).click();
+  assert.equal(await page.locator('body').evaluate(el => el.classList.contains('demo-mode')), true);
+  assertions.push('Workflow selection, removable mentions, context pins, and demo mode work in the bundled panel.');
+
+  const chatState = { ...base, activeConversationId:'active', conversations:[
+    { id:'active', title:'Current task', messageCount:2, updatedAt:Date.now() },
+    { id:'previous', title:'Earlier review', messageCount:4, updatedAt:Date.now() },
+  ] };
+  await page.evaluate(state => window.postMessage({type:'state',state},'*'), chatState);
+  await page.locator('#history-btn').click();
+  await page.locator('#history-search').fill('earlier');
+  const previousChat = page.locator('.history-item', {hasText:'Earlier review'});
+  assert.equal(await page.locator('.history-item').count(), 1);
+  await previousChat.press('Enter');
+  assert.deepEqual(await page.evaluate(() => window.__actions.at(-1)), {type:'switchConversation',id:'previous'});
+  assert.equal(await page.locator('#history-drawer').isHidden(), true);
+  assertions.push('Chat history search and keyboard selection open the matching conversation.');
+
+  const impactState = { ...reviewState, impactResults:[{
+    targetFile:'src/example.ts', consumers:['src/consumer.ts'], relatedTests:['tests/example.test.ts'], riskLevel:'medium', partial:true,
+  }] };
+  await page.evaluate(state => window.postMessage({type:'state',state},'*'), reviewState);
+  await page.locator('.review-file').waitFor({state:'visible'});
+  await page.evaluate(state => window.postMessage({type:'state',state},'*'), impactState);
+  const radar = page.locator('.review-file .impact-radar-card');
+  await radar.getByText('↳ src/consumer.ts').waitFor();
+  assert.match(await radar.innerText(), /outside the scan/);
+  assertions.push('An asynchronous impact scan updates the existing hunk review and reports partial coverage.');
+
+  const reproState = { ...base, reproSession:{phase:'capturing', errorText:'', stackTrace:'', affectedFile:''} };
+  await page.evaluate(state => window.postMessage({type:'state',state},'*'), reproState);
+  await page.locator('#repro-error-input').fill('A failure to reproduce');
+  await page.locator('#repro-stack-input').fill('A stack trace');
+  await page.evaluate(state => window.postMessage({type:'state',state},'*'), reproState);
+  await page.locator('#repro-submit-btn').click();
+  const repro = await page.evaluate(() => window.__actions.at(-1));
+  assert.equal(repro.type, 'submitRepro');
+  assert.equal(repro.errorText, 'A failure to reproduce');
+  assert.equal(repro.stackTrace, 'A stack trace');
+  assertions.push('Diagnostic state refreshes preserve both fields of a reproduction draft.');
+
   assert.deepEqual(errors,[]);
   await writeFile('test-results/ui-smoke.json',JSON.stringify({checkedAt:new Date().toISOString(),fixture:'Exact extension renderer with a VS Code message fixture; not a native editor or live model run.',assertions,errors},null,2));
   console.log(JSON.stringify({assertions:assertions.length,errors:errors.length}));
-} finally { await browser.close(); await new Promise(resolve=>server.close(resolve)); }
+} finally {
+  const serverClosed = new Promise(resolve => server.close(resolve));
+  server.closeAllConnections();
+  await browser.close();
+  await serverClosed;
+}

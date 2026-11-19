@@ -59,7 +59,7 @@ async function integration(): Promise<void> {
   const model = createServer(async (request, response) => {
     try {
       const buffers: Buffer[] = []; for await (const chunk of request) buffers.push(Buffer.from(chunk));
-      const body = JSON.parse(Buffer.concat(buffers).toString()) as { tools?: Array<{ function: { name: string } }> };
+      const body = JSON.parse(Buffer.concat(buffers).toString()) as { model?: string; tools?: Array<{ function: { name: string } }> };
       assert.match(request.url ?? '', /\/chat\/completions$/);
       modelCalls++;
       if (scenario === 'auth-failure' || scenario === 'transient-failure') {
@@ -76,6 +76,19 @@ async function integration(): Promise<void> {
       }
       const available = body.tools?.map(tool => tool.function.name) ?? [];
       const name = (wanted: string) => { const match = available.find(tool => tool === wanted || tool.endsWith('_' + wanted)); assert.ok(match, `Fixture needs tool ${wanted}; available=${available.join(',')}`); return match; };
+      if (scenario === 'ask' || scenario === 'plan') {
+        assert.equal(available.some(tool => /(?:propose_changes|apply_proposal|run_command)$/.test(tool)), false);
+        for (const tool of expectedEditorTools.slice(0, 6)) name(tool);
+        const step = scenarioStep++;
+        modelReply(response, step, step === 0 ? { name: name('read_file'), args: { path: 'src/hello.ts' } } : undefined);
+        return;
+      }
+      if (scenario === 'reviewer') {
+        assert.equal(body.model, 'scripted-review');
+        assert.equal(available.some(tool => expectedEditorTools.some(name => tool.endsWith(name))), false);
+        modelReply(response, scenarioStep++);
+        return;
+      }
       for (const tool of expectedEditorTools) { name(tool); observedEagerTools.add(tool); }
       const steps: Array<() => { name: string; args: unknown } | undefined> = [
         () => ({ name: name('read_file'), args: { path: 'src/hello.ts' } }),
@@ -108,7 +121,8 @@ async function integration(): Promise<void> {
       try { await client.health(); healthy = true; break; } catch { await new Promise(resolve => setTimeout(resolve, 300)); }
     }
     assert.ok(healthy, `Harness did not become healthy. ${log.slice(-1800)}`);
-    const configured = await fetch(`${harnessUrl}/api/v1/settings/model-providers`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ manifest: { type: 'custom', name: 'spike-fixture', base_url: `http://127.0.0.1:${modelAddress.port}/v1`, models: [{ name: 'scripted', model_id: 'scripted', properties: { context_length: 32768, max_output_tokens: 4096 } }] } }) });
+    const models = ['scripted', 'scripted-review'].map(name => ({ name, model_id: name, properties: { context_length: 32768, max_output_tokens: 4096 } }));
+    const configured = await fetch(`${harnessUrl}/api/v1/settings/model-providers`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ manifest: { type: 'custom', name: 'spike-fixture', base_url: `http://127.0.0.1:${modelAddress.port}/v1`, models } }) });
     assert.equal(configured.status, 201, await configured.text());
     await client.registerEditor(editor);
     const sessionId = await client.create('spike-fixture/scripted', editor.name, 'agent', 32768);
@@ -134,7 +148,7 @@ async function integration(): Promise<void> {
     const reset = (name: string) => {
       tools.stop(); scenario = name; scenarioStep = 0; stagedId = ''; beforeHash = '';
       const controller = new AbortController();
-      tools.start({ id: `spike-${name}`, signal: controller.signal, contextBudget: 6000, performedAction: false });
+      tools.start({ id: `spike-${name}`, signal: controller.signal, contextBudget: 6000, performedAction: false, readOnly: name === 'ask' || name === 'plan' || name === 'reviewer' });
       return controller;
     };
     const stageScenario = async (name: string) => {
@@ -198,9 +212,25 @@ async function integration(): Promise<void> {
       assert.equal(await fs.readFile(path.join(fixtureRoot, 'src', 'hello.ts'), 'utf8'), original);
       scenarioReceipts.push({ name, sessionId: id, upstreamFixtureStatus: name === 'auth-failure' ? 401 : 503, providerRequests: modelCalls - beforeCalls, terminalState, surfacedError, sourceUnchanged: true });
     }
+    for (const mode of ['ask', 'plan', 'reviewer'] as const) {
+      reset(mode);
+      const reviewer = mode === 'reviewer';
+      const modelName = reviewer ? 'spike-fixture/scripted-review' : 'spike-fixture/scripted';
+      const id = await client.create(modelName, reviewer ? '' : editor.name, mode, 32768, '', 512);
+      const initialCalls = calls.length;
+      let finished = false;
+      await client.turn(id, [{ type: 'user.message', content: 'Exercise a read-only workflow using the deterministic fixture.' }], event => {
+        events.push(event);
+        if (event.type === 'turn.done') finished = (event.state as {status?: string}).status === 'done';
+      });
+      assert.ok(finished, `${mode} must complete through the real harness.`);
+      assert.deepEqual(calls.slice(initialCalls), reviewer ? [] : ['read_file']);
+      assert.equal(await fs.readFile(path.join(fixtureRoot, 'src', 'hello.ts'), 'utf8'), original);
+      scenarioReceipts.push({ name: mode, sessionId: id, model: modelName, workspaceCalls: calls.slice(initialCalls), sourceUnchanged: true });
+    }
     const health = await client.health();
     assert.deepEqual([...observedEagerTools].sort(), [...expectedEditorTools].sort(), 'All nine editor tools must be exposed directly to the fixture model.');
-    const receipt = { checkedAt: new Date().toISOString(), fixture: 'Deterministic OpenAI-compatible protocol fixture; no real model inference.', harnessVersion: health.version, sessionId, harnessUrl, sessionUrl: client.sessionUrl(sessionId), storage: root, modelCalls, editorCalls: calls, eagerEditorTools: [...observedEagerTools].sort(), eventTypes: [...new Set(events.map(event => event.type))], assertions: { realHarness: true, realMcpRead: calls.includes('read_file'), privateStaging: true, trueForgeApproval: true, eagerEditorToolExposure: observedEagerTools.size === expectedEditorTools.length, reviewedApply: true, checkpointUndo: true, deniedApplySkipped: true, cancelledGrantRevoked: true, streamingCancellation: true, authenticationFailure: true, transientFailure: true }, scenarios: scenarioReceipts, liveModelReasoningVerified: false };
+    const receipt = { checkedAt: new Date().toISOString(), fixture: 'Deterministic OpenAI-compatible protocol fixture; no real model inference.', harnessVersion: health.version, sessionId, harnessUrl, sessionUrl: client.sessionUrl(sessionId), storage: root, modelCalls, editorCalls: calls, eagerEditorTools: [...observedEagerTools].sort(), eventTypes: [...new Set(events.map(event => event.type))], assertions: { realHarness: true, realMcpRead: calls.includes('read_file'), privateStaging: true, trueForgeApproval: true, eagerEditorToolExposure: observedEagerTools.size === expectedEditorTools.length, reviewedApply: true, checkpointUndo: true, deniedApplySkipped: true, cancelledGrantRevoked: true, streamingCancellation: true, authenticationFailure: true, transientFailure: true, readOnlyAsk: true, readOnlyPlan: true, independentToolFreeReviewer: true }, scenarios: scenarioReceipts, liveModelReasoningVerified: false };
     await fs.writeFile(path.join(project, 'test-results', 'trueforge-spike.json'), JSON.stringify(receipt, null, 2) + '\n');
     console.log(JSON.stringify(receipt, null, 2));
   } finally {

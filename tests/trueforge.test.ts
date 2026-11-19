@@ -125,6 +125,14 @@ test('official pinned schema/runtime eagerly exposes allowed tools while preserv
     assert.equal(calls, 0);
     await assert.rejects(tools.callTool({ name: 'unexpected_tool' }), /not allowed/);
   }
+  for (const mode of ['ask', 'plan'] as const) {
+    const spec = AgentSpecSchema.parse(agentSpec('local/model', 'editor', mode, 32768));
+    assert.deepEqual(spec.mcp_servers![0].enable_tools, names.slice(0, 6));
+    assert.deepEqual(spec.mcp_servers![0].require_approval_for_tools, []);
+  }
+  const reviewer = AgentSpecSchema.parse(agentSpec('different/model', '', 'reviewer', 32768, '', 500));
+  assert.deepEqual(reviewer.mcp_servers, []);
+  assert.equal(reviewer.model.params?.max_tokens, 500);
 });
 
 test('SSE handles byte-split UTF-8, comments and multiline JSON; rejects incomplete or oversized frames', async () => {
