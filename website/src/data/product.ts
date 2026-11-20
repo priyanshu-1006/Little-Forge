@@ -1,13 +1,17 @@
 import { Braces, GitPullRequest, RotateCcw } from 'lucide-react'
 import release from './release.json'
+import cliRelease from './cli-release.json'
 
 export const project = {
   name: 'Little Forge',
   repository: 'https://github.com/priyanshu-1006/Little-Forge',
+  npmPackage: 'https://www.npmjs.com/package/little-forge-cli',
+  cliInstall: 'npm install -g little-forge-cli\nlittle-forge',
   trueForge: 'https://github.com/truefoundry/trueforge',
   harness: '0.180.1',
   port: 8790,
   release,
+  cliRelease,
 }
 
 export const providers = [

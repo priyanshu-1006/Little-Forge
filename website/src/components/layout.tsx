@@ -8,6 +8,7 @@ import { DocsSearch } from './docs-search'
 
 const links = [
   { label: 'Workflows', to: '/#workflows' },
+  { label: 'Terminal CLI', to: '/#cli' },
   { label: 'Demo', to: '/#demo' },
   { label: 'Documentation', to: '/docs' },
 ]
@@ -62,14 +63,18 @@ export function SiteFooter() {
   return (
     <footer className="site-footer">
       <div className="wrap footer-main">
-        <div><Brand /><p>A coding agent for VS Code, powered by TrueForge.</p></div>
+        <div><Brand /><p>A coding agent for VS Code and your terminal, powered by TrueForge.</p></div>
         <nav aria-label="Footer navigation" className="footer-nav">
           <Link to="/docs"><BookOpen size={16} /> Documentation</Link>
           <Link to="/download"><Download size={16} /> Download</Link>
           <a href={project.repository} target="_blank" rel="noreferrer"><GitFork size={16} /> Source on GitHub</a>
         </nav>
       </div>
-      <div className="wrap footer-base"><span>Built by Optimistic Mutant Coders</span><a href={`${project.repository}/blob/main/LICENSE`} target="_blank" rel="noreferrer">MIT License</a></div>
+      <div className="wrap footer-base">
+        <span>Built by Optimistic Mutant Coders</span>
+        <span>Node.js® is a trademark of the OpenJS Foundation.<br />npm is a registered trademark of npm, Inc.</span>
+        <a href={`${project.repository}/blob/main/LICENSE`} target="_blank" rel="noreferrer">MIT License</a>
+      </div>
     </footer>
   )
 }

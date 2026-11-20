@@ -1,6 +1,6 @@
 # Little Forge product site
 
-This is the standalone React, Vite and Tailwind CSS website. It includes local shadcn-style components built on Radix, a downloadable VSIX, seven documentation pages with search, three short workflow videos, and the full narrated demo with English captions.
+This is the standalone React, Vite and Tailwind CSS website. It includes local shadcn-style components built on Radix, downloadable VS Code and terminal CLI packages, searchable documentation, three short workflow videos, and the narrated demo with English captions.
 
 ## Run locally
 
@@ -26,9 +26,10 @@ The site uses static files and requires no environment variables. The local True
 ## Update release assets
 
 - `src/data/release.json` provides the version, compatibility requirements, filename, file size, and SHA-256 shown by the site. Keep it in sync with the VSIX in `public/downloads/`.
+- To rebuild the terminal download, run `npm --prefix packages/cli run release:prepare` from the repository root after `npm ci`. It builds the npm tarball, updates `public/downloads/`, and writes the corresponding `src/data/cli-release.json`.
 - `public/media/` holds the narrated MP4, captions, posters, and optimized muted clips. The chapters are defined in `src/data/product.ts`.
 - `src/data/documentation.ts` holds the docs in structured sections. The search index is generated from that content in the browser.
-- `public/brand/` holds the supplied Little Forge mark and existing provider icons.
+- `public/brand/` holds the supplied Little Forge mark, provider icons, and the official horizontal [Node.js® logo](https://nodejs.org/en/about/branding) used to link to the Node.js home page.
 
 ## Artwork
 

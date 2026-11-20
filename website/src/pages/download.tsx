@@ -1,4 +1,4 @@
-import { BookOpen, Download, FileCheck2, GitFork, Package, Terminal } from 'lucide-react'
+import { ArrowUpRight, BookOpen, Download, FileCheck2, GitFork, Package, Terminal } from 'lucide-react'
 import { useEffect } from 'react'
 import { Link } from 'react-router-dom'
 import { Button } from '@/components/ui/button'
@@ -7,8 +7,8 @@ import { CodeBlock } from '@/components/code-block'
 import { project } from '@/data/product'
 
 export function DownloadPage() {
-  useEffect(() => { document.title = 'Download Little Forge for VS Code' }, [])
-  const { release } = project
+  useEffect(() => { document.title = 'Download Little Forge for VS Code or Terminal' }, [])
+  const { release, cliRelease } = project
 
   return (
     <main id="main-content" className="wrap download-page">
@@ -17,7 +17,10 @@ export function DownloadPage() {
           <p className="eyebrow"><Package size={17} /> VS Code extension</p>
           <h1 id="download-title">Download<br />Little Forge.</h1>
           <p>Install the VSIX in VS Code and connect your local TrueForge harness.</p>
-          <Button asChild size="lg"><a href={release.file} download={release.filename}><Download /> Download v{release.version}</a></Button>
+          <div className="cta-actions">
+            <Button asChild size="lg"><a href={release.file} download={release.filename}><Download /> Download v{release.version}</a></Button>
+            <Button asChild size="lg" variant="outline"><Link to="/download#cli-download-title"><Terminal /> Terminal CLI</Link></Button>
+          </div>
         </div>
         <img src="/brand/little-forge.webp" alt="" width="224" height="214" />
       </section>
@@ -42,6 +45,19 @@ export function DownloadPage() {
           <Button asChild variant="ghost"><a href={project.repository} target="_blank" rel="noreferrer"><GitFork /> View source</a></Button>
         </aside>
       </div>
+      <section className="cli-download-panel" aria-labelledby="cli-download-title">
+        <div>
+          <p className="eyebrow"><Terminal size={16} /> Terminal CLI</p>
+          <h2 id="cli-download-title">Little Forge in your terminal.</h2>
+          <p>Open an interactive coding workspace with a streaming conversation, Ask, Plan and Build modes, and inline diff approval.</p>
+          <div className="cta-actions">
+            <Button asChild><a href={project.npmPackage} target="_blank" rel="noreferrer">View on npm <ArrowUpRight /></a></Button>
+            <Button asChild variant="outline"><Link to="/docs/cli"><BookOpen /> CLI guide</Link></Button>
+          </div>
+          <a className="cli-archive-link" href={cliRelease.file} download={cliRelease.filename}>Download CLI archive v{cliRelease.version}</a>
+        </div>
+        <CodeBlock label="Install from the npm registry" value={project.cliInstall} />
+      </section>
       <section className="faq-section" aria-labelledby="faq-title">
         <h2 id="faq-title">Before you install.</h2>
         <Accordion type="single" collapsible>

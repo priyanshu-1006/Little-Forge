@@ -21,16 +21,16 @@ const links = (...items: { label: string; href: string }[]): DocBlock => ({ type
 export const docs: DocPage[] = [
   {
     slug: '', title: 'Introduction', group: 'Get started',
-    description: 'Install the VS Code extension, start TrueForge, and make your first reviewed change.',
+    description: 'Install Little Forge for VS Code or your terminal, start TrueForge, and make your first reviewed change.',
     sections: [
       { id: 'how-it-works', title: 'How it works', blocks: [
-        text('Little Forge is a VS Code client for a local TrueForge agent. It streams the run into the editor, retrieves a bounded set of repository excerpts, and stages source edits for you to review.'),
+        text('Little Forge connects VS Code and your terminal to a local TrueForge agent. It streams the run, retrieves a bounded set of repository excerpts, and stages source edits for you to review.'),
         text('TrueForge runs the agent loop and talks to your configured model provider. A cloud model can receive the prompt and selected repository context you send from the editor.'),
         links({ label: 'Read the architecture', href: '/docs/architecture' }, { label: 'Watch the narrated walkthrough', href: '/#demo' }),
       ] },
       { id: 'first-run', title: 'Your first run', blocks: [
         list('Install the downloadable VSIX in VS Code.','Run the pinned TrueForge harness on your machine.','Configure a tool-capable model and open a trusted repository.','Try an inline edit on a saved function or use Ask mode to learn how a repository works.'),
-        links({ label: 'Install Little Forge', href: '/docs/installation' }, { label: 'Configure a model', href: '/docs/models' }),
+        links({ label: 'Install the VS Code extension', href: '/docs/installation' }, { label: 'Install the terminal CLI', href: '/docs/cli' }, { label: 'Configure a model', href: '/docs/models' }),
       ] },
     ],
   },
@@ -57,6 +57,40 @@ export const docs: DocPage[] = [
         text('Open a trusted local repository. On the Activity Bar select Little Forge, or run `Little Forge: Open Agent` from the Command Palette. Connect and choose a configured model.'),
         note('Using a different port?', `Set \`littleForge.baseUrl\` to the origin of your local TrueForge server. The normal default is \`http://127.0.0.1:${project.port}\`.`),
         links({ label: 'Set up providers and models', href: '/docs/models' }),
+      ] },
+    ],
+  },
+  {
+    slug: 'cli', title: 'Terminal CLI', group: 'Get started',
+    description: 'Use Little Forge from a shell with the local TrueForge harness and interactive hunk review.',
+    sections: [
+      { id: 'install', title: 'Install the npm package', blocks: [
+        text(`Use the npm package manager to install Little Forge. Node.js ${project.release.node} or newer is required.`),
+        code('Terminal', project.cliInstall),
+        note('Windows PowerShell', 'Use `npm.cmd` and `little-forge.cmd` if PowerShell blocks the script wrappers.'),
+        links({ label: 'View little-forge-cli on npm', href: project.npmPackage }, { label: 'Download the CLI archive', href: '/download#cli-download-title' }),
+      ] },
+      { id: 'connect', title: 'Connect to TrueForge', blocks: [
+        text(`Start the local harness and configure a tool-capable model in the TrueForge UI at \`http://127.0.0.1:${project.port}\`. Reuse an existing harness if the VS Code extension is already connected.`),
+        code('Standalone TrueForge on PowerShell', `$env:HOST = '127.0.0.1'\nnpx.cmd @truefoundry/trueforge@${project.harness} --port ${project.port}`),
+        code('Standalone TrueForge on macOS or Linux', `HOST=127.0.0.1 npx @truefoundry/trueforge@${project.harness} --port ${project.port}`),
+        code('Inspect the setup', 'little-forge doctor\nlittle-forge models'),
+        text('Use `--model <id>` to select a configured model. Set `LITTLE_FORGE_MODEL` to reuse that choice.'),
+        links({ label: 'Use the repository launcher with Workers AI support', href: '/docs/installation#start-trueforge' }),
+      ] },
+      { id: 'interactive', title: 'Use the interactive workspace', blocks: [
+        code('Open a project', 'little-forge\nlittle-forge chat --mode plan'),
+        list('Enter sends your request or queues one follow-up. Alt+Enter and Ctrl+J insert a line break.', 'Tab switches modes. Use Ctrl+P for commands and @ for file suggestions.', 'Page Up and Page Down scroll the transcript. Esc stops the run or declines the current review.', 'During review, choose with Y/N or the arrow keys, then press Enter. Decline is selected by default.'),
+        text('Use `/models` to switch models, `/context` for retrieved files, `/session` for the TrueForge link, and `/new` for a fresh conversation. `/continue` returns to the previous task after inspecting current files.'),
+      ] },
+      { id: 'modes', title: 'Run Ask, Plan, and Build directly', blocks: [
+        text('Run the CLI from the project directory, or use `--cwd <directory>`. Ask and Plan are read-only. Build requires interactive approval for each hunk and asks separately before running a supported project check.'),
+        code('Try it on Flask', 'little-forge ask "Where are CLI commands registered?"\nlittle-forge plan "Plan a CLI command for app config."\nlittle-forge build "Treat off as a false debug flag."'),
+        text('Use `little-forge checkpoints` to find a saved edit and `little-forge undo <id>` to review and restore it. Ctrl+C requests cancellation of the active run.'),
+      ] },
+      { id: 'scripts', title: 'Preview and script a run', blocks: [
+        code('Preview a patch or inspect context', 'little-forge build --preview "Treat off as a false debug flag."\nlittle-forge context --json "Where is the debug flag tested?"'),
+        text('Build previews also work in scripts. With `--json` or without a terminal, Build emits proposals and declines write and check approvals. The offline `context` command lists the chosen source ranges and retrieval reasons.'),
       ] },
     ],
   },

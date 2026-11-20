@@ -1,10 +1,11 @@
-import { BookOpen, Check, Code2, Download, Maximize2, Play, Radio, Workflow } from 'lucide-react'
+import { ArrowUpRight, BookOpen, Check, Code2, Download, Maximize2, Package, Play, Radio, Workflow } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogTitle, DialogTrigger } from '@/components/ui/dialog'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { MotionClip, NarratedDemo } from '@/components/media'
 import { AgentShowcase, HeroPrompt, useReducedMotion } from '@/components/agent-demo'
+import { CliShowcase } from '@/components/cli-showcase'
 import { project, providers, workflows } from '@/data/product'
 
 const heroAlt = 'Little Forge inside VS Code. The native Flask diff is open beside Impact Radar, which lists downstream files and related tests.'
@@ -14,14 +15,17 @@ function Hero({ reduced }: { reduced: boolean }) {
     <section className="hero" aria-labelledby="home-title">
       <div className="hero-inner">
         <div className="hero-copy">
-          <div className="eyebrow hero-eyebrow"><Code2 size={18} /> VS Code extension</div>
+          <div className="eyebrow hero-eyebrow"><Code2 size={18} /> VS Code &amp; terminal</div>
           <h1 id="home-title">Your code.<br />Your <em>call.</em></h1>
-          <p>Little Forge understands your repository, proposes changes, and puts every hunk up for review in your editor.</p>
+          <p>Little Forge reads your repository, proposes changes, and puts every hunk up for review in VS Code or your terminal.</p>
           <HeroPrompt reduced={reduced} />
           <div className="hero-actions">
             <Button asChild size="lg"><a href={project.release.file} download={project.release.filename}><Download /> Download for VS Code</a></Button>
             <Button asChild size="lg" variant="outline"><Link to="/#demo"><Play /> Watch the demo</Link></Button>
           </div>
+          <a className="hero-registry-link" href={project.npmPackage} target="_blank" rel="noreferrer">
+            <Package size={16} aria-hidden="true" /> Little Forge CLI on npm <ArrowUpRight size={15} aria-hidden="true" />
+          </a>
           <div className="hero-meta"><span>v{project.release.version} · VSIX</span><span>Open source</span><span>Runs on TrueForge</span></div>
         </div>
         <figure className="hero-workbench">
@@ -146,6 +150,7 @@ export function Home() {
     <main id="main-content">
       <Hero reduced={reduced} />
       <ProviderRail />
+      <CliShowcase />
       <AgentShowcase reduced={reduced} />
       <Workflows />
       <Demo />
