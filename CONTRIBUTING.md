@@ -37,7 +37,9 @@ It serves <http://127.0.0.1:8790> and keeps its state in the ignored `.trueforge
 | `src/core/` | Workspace access, context assembly, proposals, exact replacements, commands, resilience |
 | `src/ui.js`, `src/ui.css` | Webview renderer (plain JS, no framework) |
 | `tests/` | `node:test` suites run through `tsx` |
-| `scripts/` | Build, harness launcher, spike, UI smoke, evaluation and submission tooling |
+| `scripts/` | Build, harness launcher, integration fixtures, UI smoke and evaluation |
+| `packages/cli/` | Terminal client and npm package tooling |
+| `website/` | Product website, online documentation and public downloads |
 | `evaluation/` | Fixed-task acceptance guide and manifest |
 | `docs/` | Requirements, verification status, live test status, free-model setup |
 | `trueforge/` | Secret-free wire-format examples for the agent definition and model configuration |
@@ -68,7 +70,7 @@ Add a focused regression test next to the behaviour you change. The suite runs o
 - Keep the change scoped to one concern and explain the behaviour it changes.
 - Note any effect on the safety boundary, the context budget or the TrueForge wire schema.
 - Update `docs/VERIFICATION.md` only with results you have actually observed.
-- Do not commit `test-results/`, `.trueforge/`, `evaluation/workspaces/`, `output/` or `tmp/`; they are ignored on purpose.
+- Keep local harness state, raw recordings, evaluation clones and test receipts in their ignored directories. The curated demo and downloads live under `website/public/`.
 
 ## Licence and attribution
 

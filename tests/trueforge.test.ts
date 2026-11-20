@@ -41,7 +41,7 @@ test('uses actual health/model endpoints and registers a new header-auth connect
     assert.deepEqual(manifest.auth, { type: 'header', headers: { Authorization: 'Bearer 12345678901234567890123456789012' } });
     json(response, { data: { name: manifest.name } }, 201);
   }, async client => {
-    assert.deepEqual(await client.health(), { models: [{ name: 'local/tool-model' }], version: '0.180.1' });
+    assert.deepEqual(await client.health(), { models: [{ name: 'local/tool-model', contextLength: 32768 }], version: '0.180.1' });
     const binding = { name: 'little-test', url: 'http://127.0.0.1:9876/mcp', token: '12345678901234567890123456789012' };
     await client.registerEditor(binding); await client.registerEditor(binding); assert.equal(registrations, 1);
   });
@@ -231,6 +231,29 @@ test('disconnect reconciliation inspects and subscribes without posting the orig
   }, async client => {
     const events: ForgeEvent[] = []; await client.turn('session', prompt, event => events.push(event));
     assert.equal(posts, 1); assert.deepEqual(events.map(event => event.type), ['turn.created', 'turn.done']);
+  });
+});
+
+test('manual reconnect uses the observed cursor after a transient disconnect and never resubmits the turn', async () => {
+  let posts = 0, inspections = 0;
+  await fixture((request, response) => {
+    if (request.method === 'POST') { posts++; sse(response, [[7, created]]); return; }
+    if (request.url?.endsWith('/turns/turn1')) {
+      if (++inspections === 1) json(response, {}, 503);
+      else json(response, { data: { id: 'turn1', state: { status: 'running' } } });
+      return;
+    }
+    assert.match(request.url ?? '', /\/subscribe\?after_sequence_number=7$/);
+    sse(response, [[7, created], [8, done]]);
+  }, async client => {
+    const events: ForgeEvent[] = [];
+    await assert.rejects(client.turn('session', prompt, event => events.push(event)), error => error instanceof ForgeError && error.ambiguous);
+    assert.equal(client.canReconnect('session'), true);
+    await client.resumeStream('session');
+    assert.equal(client.canReconnect('session'), false);
+    await assert.rejects(client.resumeStream('session'), /No active stream/);
+    assert.equal(posts, 1);
+    assert.deepEqual(events.map(event => event.type), ['turn.created', 'turn.done']);
   });
 });
 

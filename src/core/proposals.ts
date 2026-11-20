@@ -195,6 +195,24 @@ export class ProposalManager {
     return result;
   }
 
+  async checkpointDiff(id: string, filePath: string): Promise<{ before: string; after: string }> {
+    const journal = await this.loadJournal(id, false);
+    const file = journal.files.find(item => item.path === filePath);
+    if (!file) throw new Error('This file is not in the saved checkpoint.');
+    await this.workspace.resolve(filePath, true);
+    return { before: file.original ?? '', after: file.after ?? '' };
+  }
+
+  async previewUndo(id: string) {
+    const journal = await this.loadJournal(id);
+    if (['restored', 'rolled-back'].includes(journal.state)) return [];
+    return Promise.all(journal.files.map(async file => {
+      const current = await this.current(file.path).catch(() => undefined);
+      const state = current?.hash === file.originalHash ? 'already restored' : current?.hash === file.afterHash ? 'can restore' : 'conflict';
+      return { path: file.path, state, before: file.original ?? '', after: file.after ?? '' };
+    }));
+  }
+
   async undo(id: string, signal?: AbortSignal): Promise<{ restored: string[]; conflicts: string[] }> {
     return this.serial(async () => {
       cancelled(signal);

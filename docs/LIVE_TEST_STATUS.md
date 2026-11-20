@@ -1,6 +1,6 @@
 # Live acceptance notes
 
-Updated 19 November 2026, IST. **Task B passed live verification. Final competition footage and submission are pending.**
+Historical rehearsal results as of 19 November 2026, IST. See the [Round 1 artifacts](../submission/README.md) for the final competition footage and scorecard.
 
 ## Current state
 

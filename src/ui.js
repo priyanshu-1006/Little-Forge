@@ -14,19 +14,17 @@ import openRouterLogo from '../resources/providers/openrouter.svg';
 import workersAiLogo from '../resources/providers/workers-ai.svg';
 import cohereLogo from '../resources/providers/cohere.svg';
 import vercelLogo from '../resources/providers/vercel.svg';
+import { appearances, isAppearance } from './appearance.js';
+import { checkResult, compareVerification } from './core/chat-workflows.js';
 
 for (const [name, language] of Object.entries({ bash, diff, javascript, json, powershell, python, typescript, xml })) highlighter.registerLanguage(name, language);
 
 /* Host-owned state; model text is always rendered safely through textContent/DOM nodes. */
 const vscode = acquireVsCodeApi();
 let state = { status: 'idle', messages: [], context: null, proposals: [], approvals: [], checkpoints: [], activity: [], connected: false, model: '', permissionMode: 'review', conversations: [], activeConversationId: '' };
-let renderedError = null;
-const isRunning = () => !['idle', 'completed', 'failed', 'cancelled'].includes(state.status);
-let errorTimer = null;
-let dismissedError = null;
-const dismissedProposals = new Set();
-const dismissedApprovals = new Set();
-const approvalDecisions = new Map();
+const isRunning = () => state.recovery?.kind === 'reconnect' || !['idle', 'completed', 'failed', 'cancelled'].includes(state.status);
+const submittedCommands = new Set();
+let submittedFollowUp;
 
 function formatCommandString(args) {
   if (!args) return 'command';
@@ -34,7 +32,7 @@ function formatCommandString(args) {
   const extra = Array.isArray(args.args) ? args.args.join(' ') : '';
   if (task === 'pytest') return extra ? `pytest ${extra}` : 'pytest';
   if (task === 'npm-test') return extra ? `npm test -- ${extra}` : 'npm test';
-  if (task === 'typecheck') return 'npx tsc --noEmit';
+  if (task === 'typecheck') return 'npm run typecheck';
   if (task === 'git-diff-check') return 'git diff --check';
   return extra ? `${task} ${extra}` : String(task);
 }
@@ -45,7 +43,46 @@ const draft = { pins: [], excluded: [], semantic: false };
 let demoMode = saved.demo === true;
 let replacement;
 const element = (tag, cls, text) => { const el = document.createElement(tag); if (cls) el.className = cls; if (text !== undefined) el.textContent = text; return el; };
-function button(text, cls, action, disabled = false) { const el = element('button', cls, text); el.disabled = disabled; el.addEventListener('click', action); return el; }
+function button(text, cls, action, disabled = false) { const el = element('button', cls, text); el.type = 'button'; el.disabled = disabled; el.addEventListener('click', action); return el; }
+
+const appearanceDialog = $('appearance-dialog');
+const appearanceToggle = $('appearance-toggle');
+const appearanceChoices = $('appearance-choices');
+for (const appearance of appearances) {
+  const option = element('label', 'appearance-option');
+  const input = element('input');
+  input.type = 'radio';
+  input.name = 'appearance';
+  input.value = appearance.id;
+  const swatch = element('span', 'appearance-swatch');
+  swatch.dataset.forgeTheme = appearance.id;
+  swatch.setAttribute('aria-hidden', 'true');
+  const caption = element('span', 'appearance-caption');
+  const description = element('small', '', appearance.description);
+  description.id = `appearance-description-${appearance.id}`;
+  input.setAttribute('aria-describedby', description.id);
+  caption.append(element('strong', '', appearance.label), description);
+  option.append(swatch, caption, input);
+  appearanceChoices.append(option);
+}
+
+function renderAppearance(value) {
+  const selected = isAppearance(value) ? value : 'system';
+  const appearance = appearances.find(option => option.id === selected);
+  document.body.dataset.forgeTheme = selected;
+  appearanceChoices.querySelector(`input[value="${selected}"]`).checked = true;
+  appearanceToggle.title = `Appearance (${appearance.label})`;
+}
+
+appearanceToggle.addEventListener('click', () => {
+  appearanceDialog.showModal();
+  appearanceChoices.querySelector(':checked')?.focus();
+});
+appearanceChoices.addEventListener('change', event => {
+  const appearance = event.target.value;
+  if (isAppearance(appearance)) send('setAppearance', { appearance });
+});
+renderAppearance('system');
 
 const markdown = new MarkdownIt({ html: false, linkify: true });
 const markdownTags = new Set([
@@ -179,9 +216,16 @@ function parseAntigravityStep(raw) {
     const q = text.replace('search workspace:', '').trim();
     return { type: 'search', prefix: 'Searched', text: `workspace for "${q}"`, arrow: true, detail: q };
   }
+  if (text.startsWith('Search match: ')) {
+    try {
+      const [path, line] = JSON.parse(text.slice(14));
+      if (typeof path === 'string' && Number.isInteger(line)) return { type: 'search', prefix: 'Match', text: `${path}:${line}`, path, line };
+    } catch { return null; }
+    return null;
+  }
   if (text.startsWith('read file:')) {
-    const p = text.replace('read file:', '').trim();
-    return { type: 'read', prefix: 'Read', badge: getLangBadge(p), text: p, arrow: true, detail: p, path: p };
+    const [p, line] = text.replace('read file:', '').trim().split(' · Line ');
+    return { type: 'read', prefix: 'Read', badge: getLangBadge(p), text: p, path: p, line: Number(line) || 1 };
   }
   if (text.startsWith('edited file:')) {
     const p = text.replace('edited file:', '').trim();
@@ -189,7 +233,7 @@ function parseAntigravityStep(raw) {
   }
   if (text.startsWith('staged file:')) {
     const p = text.replace('staged file:', '').trim();
-    return { type: 'stage', prefix: 'Created', badge: getLangBadge(p), text: p, arrow: false, detail: p, path: p };
+    return { type: 'stage', prefix: 'Staged', badge: getLangBadge(p), text: p, path: p };
   }
   if (text.startsWith('ran command:') || text.startsWith('run command:')) {
     const cmdFull = text.replace(/^(?:ran command|run command):/, '').trim();
@@ -201,8 +245,10 @@ function parseAntigravityStep(raw) {
   }
   if (text.startsWith('Auto-allowed verification check:')) {
     const cmd = text.replace('Auto-allowed verification check:', '').trim();
-    return { type: 'command', prefix: 'Ran', text: cmd, arrow: true, detail: cmd };
+    return { type: 'approval', prefix: 'Allowed', text: cmd };
   }
+  if (text.startsWith('Interrupted:')) return { type: 'error', prefix: 'Interrupted', text: text.slice(12).trim() };
+  if (/approval|paused for/.test(text) && text.startsWith('TrueForge')) return { type: 'approval', text };
   if (text.startsWith('get workspace map') || text.startsWith('get_workspace_map')) {
     return { type: 'map', prefix: 'Explored', text: 'workspace tree', arrow: true };
   }
@@ -212,21 +258,7 @@ function parseAntigravityStep(raw) {
   if (text === 'Tool result received' || text.startsWith('Context:') || text.startsWith('Reasoning effort:') || text.startsWith('Local Permissions:') || text.startsWith('Permissions set to:')) {
     return null;
   }
-  return { type: 'generic', prefix: 'Ran', text: text, arrow: true };
-}
-
-function formatToolStep(raw) {
-  const text = String(raw || '').trim();
-  if (text.startsWith('search workspace') || text.startsWith('search_workspace')) return { iconSvg: SVG_ICONS.search, label: 'Searching workspace' };
-  if (text.startsWith('read file') || text.startsWith('read_file')) return { iconSvg: SVG_ICONS.file, label: 'Reading source file' };
-  if (text.startsWith('propose changes') || text.startsWith('propose_changes')) return { iconSvg: SVG_ICONS.edit, label: 'Staging multi-file changes' };
-  if (text.startsWith('apply proposal') || text.startsWith('apply_proposal')) return { iconSvg: SVG_ICONS.zap, label: 'Applying approved changes' };
-  if (text.startsWith('run command') || text.startsWith('run_command')) return { iconSvg: SVG_ICONS.terminal, label: 'Running project command' };
-  if (text.startsWith('get workspace map') || text.startsWith('get_workspace_map')) return { iconSvg: SVG_ICONS.map, label: 'Mapping repository tree' };
-  if (text.startsWith('retrieve context') || text.startsWith('retrieve_context')) return { iconSvg: SVG_ICONS.book, label: 'Retrieving context evidence' };
-  if (text === 'Tool result received') return { iconSvg: SVG_ICONS.check, label: 'Tool response processed' };
-  if (text.startsWith('Context:')) return { iconSvg: SVG_ICONS.file, label: text };
-  return { iconSvg: SVG_ICONS.terminal, label: text };
+  return { type: 'generic', text };
 }
 
 function renderCodeBlock(code, info) {
@@ -267,6 +299,7 @@ function renderCodeBlock(code, info) {
     toggle('Wrap', 'wrap', active => pre.classList.toggle('wrap-code', active), 'Unwrap'),
     toggle('Collapse', 'collapse', active => { body.hidden = active; }, 'Expand'),
     copyBtn,
+    button('Open in editor', 'copy-btn', () => send('openCodeBlock', { code, language: (language ?? '').slice(0, 50) }), code.length > 1024 * 1024),
   );
   const body = element('div', 'code-block-body');
   body.append(pre);
@@ -298,7 +331,7 @@ function appendMarkdownTokens(target, tokens) {
 
       const href = token.tag === 'a' ? token.attrGet('href') : null;
       const safeLink = href && /^https?:\/\//i.test(href);
-      const citation = href?.match(/^(?:\.\/)?([^:#?]+\.[\w+-]+)#L([1-9]\d*)(?:-L\d+)?$/);
+      const citation = href?.match(/^(?:\.\/)?([^:#?]+\.[\w+-]+)#L([1-9]\d*)(?:-L([1-9]\d*))?$/);
       const node = element(token.tag === 'a' && !safeLink && !citation ? 'span' : token.tag);
       if (safeLink) {
         node.href = href;
@@ -311,10 +344,12 @@ function appendMarkdownTokens(target, tokens) {
         let file;
         try { file = decodeURIComponent(citation[1]); } catch { file = citation[1]; }
         node.href = '#';
-        node.title = `Open ${file} at line ${citation[2]}`;
+        const line = Number(citation[2]);
+        const endLine = citation[3] ? Number(citation[3]) : undefined;
+        node.title = endLine && endLine > line ? `Open ${file}, lines ${line}–${endLine}` : `Open ${file} at line ${line}`;
         node.addEventListener('click', event => {
           event.preventDefault();
-          send('openSource', { path: file, line: Number(citation[2]) });
+          send('openSource', { path: file, line, ...(endLine && endLine > line ? { endLine } : {}) });
         });
       }
       if (token.tag === 'ol') {
@@ -377,77 +412,78 @@ function plainResponse(text) {
 }
 
 function renderStepList(list, steps) {
-  const existingRows = Array.from(list.children);
-  if (existingRows.length === steps.length) {
-    const lastRow = existingRows[existingRows.length - 1];
-    const lastStep = steps[steps.length - 1];
-    const key = `${lastStep.prefix || ''}-${lastStep.text}-${lastStep.suffix || ''}`;
-    if (lastRow && lastRow.dataset.stepKey === key) {
-      return;
-    }
+  const signature = JSON.stringify(steps);
+  if (list.dataset.steps === signature) return;
+  list.dataset.steps = signature;
+  const open = new Set([...list.querySelectorAll('details[open][data-step-key]')].map(item => item.dataset.stepKey));
+  const groups = [];
+  for (const step of steps) {
+    const exploratory = step.type === 'read' || step.type === 'search';
+    const last = groups.at(-1);
+    if (exploratory && last?.exploratory) last.steps.push(step);
+    else groups.push({ exploratory, steps: [step] });
   }
-
-  list.replaceChildren(...steps.map((step, sIdx) => {
-    const key = `${step.prefix || ''}-${step.text}-${step.suffix || ''}`;
-    const existing = existingRows[sIdx];
-    if (existing && existing.dataset.stepKey === key) {
-      return existing;
-    }
-
-    const sRow = element('div', 'work-step-row');
-    sRow.dataset.stepKey = key;
-    if (step.prefix) {
-      sRow.append(element('span', 'work-step-prefix', step.prefix));
-    }
-    if (step.badge) {
-      sRow.append(element('span', `lang-tag ${step.badge.cls}`, step.badge.label));
-    }
-    sRow.append(element('span', 'work-step-text', step.text));
-    if (step.suffix) {
-      sRow.append(element('span', 'work-step-suffix', ` ${step.suffix}`));
-    }
-    if (step.arrow) {
-      sRow.append(element('span', 'work-step-arrow', '›'));
-    }
-
-    if (step.path) {
-      sRow.title = `Click to inspect diff for ${step.path}`;
-      sRow.addEventListener('click', e => {
-        e.stopPropagation();
-        send('openDiff', { path: step.path });
-      });
-    } else if (step.detail) {
-      const detailEl = element('div', 'work-step-detail', step.detail);
-      detailEl.hidden = true;
-      sRow.addEventListener('click', e => {
-        e.stopPropagation();
-        detailEl.hidden = !detailEl.hidden;
-        sRow.classList.toggle('expanded', !detailEl.hidden);
-      });
-      const container = element('div', 'work-step-item');
-      container.dataset.stepKey = key;
-      container.append(sRow, detailEl);
-      return container;
-    }
-
-    return sRow;
-  }));
+  const rows = groups.map(group => {
+    if (group.steps.length === 1) return renderStep(group.steps[0], open, list.dataset.attemptId);
+    const first = group.steps[0];
+    const key = first.type + ':' + first.text;
+    const batch = element('details', 'work-batch');
+    batch.dataset.stepKey = key;
+    batch.dataset.timelineKind = 'activity';
+    batch.open = open.has(key);
+    const files = new Set(group.steps.filter(step => step.type === 'read').map(step => step.path)).size;
+    const searches = group.steps.filter(step => step.type === 'search' && !step.path).length;
+    const matches = group.steps.filter(step => step.type === 'search' && step.path).length;
+    const parts = [files && 'Read ' + files + ' ' + (files === 1 ? 'file' : 'files'),
+      searches && searches + ' ' + (searches === 1 ? 'search' : 'searches'),
+      matches && matches + ' ' + (matches === 1 ? 'match' : 'matches')].filter(Boolean);
+    batch.append(element('summary', '', parts.join(' · ')), ...group.steps.map(step => renderStep(step, open, list.dataset.attemptId)));
+    return batch;
+  });
+  list.replaceChildren(...rows);
 }
 
-function createWorkTraceElement(busy, steps) {
+function renderStep(step, open, attemptId) {
+  const row = element(step.path ? 'button' : step.detail ? 'summary' : 'div', 'work-step-row');
+  const kind = { edit: 'edits', stage: 'edits', command: 'checks', error: 'errors', approval: 'approvals' }[step.type] || 'activity';
+  if (step.prefix) row.append(element('span', 'work-step-prefix', step.prefix));
+  if (step.badge) row.append(element('span', 'lang-tag ' + step.badge.cls, step.badge.label));
+  row.append(element('span', 'work-step-text', step.text));
+  if (step.suffix) row.append(element('span', 'work-step-suffix', step.suffix));
+  if (step.path) {
+    row.type = 'button';
+    const isSource = step.type === 'read' || step.type === 'search';
+    row.title = isSource ? 'Open source in the editor' : 'Open file diff';
+    row.dataset.timelineKind = kind;
+    row.addEventListener('click', () => {
+      if (isSource) send('openSource', { path: step.path, line: step.line ?? 1, ...(attemptId ? { attemptId } : {}) });
+      else send('openDiff', { path: step.path });
+    });
+    return row;
+  }
+  if (!step.detail) {
+    row.dataset.timelineKind = kind;
+    return row;
+  }
+  const key = step.type + ':' + step.text;
+  const details = element('details', 'work-step-item');
+  details.dataset.stepKey = key;
+  details.dataset.timelineKind = kind;
+  details.open = open.has(key);
+  details.append(row, element('p', 'work-step-detail', step.detail));
+  return details;
+}
+
+function createWorkTraceElement(busy, steps, historical = false, attemptId) {
   const trace = element('details', 'work-trace');
-  trace.open = true;
+  trace.open = busy;
 
   const summary = element('summary', 'work-trace-summary');
   const timerSpan = element('span', 'work-trace-timer');
-  if (busy) {
-    const cur = getCurrentProcess(state, busy);
-    timerSpan.replaceChildren(createDynamicLoadingElement(cur.text));
-  } else {
-    timerSpan.textContent = `Worked for ${formatDuration(lastCompletedDuration ?? 0)}`;
-  }
+  timerSpan.textContent = busy || historical ? 'Activity' : `Worked for ${formatDuration(lastCompletedDuration ?? 0)}`;
   const twisty = element('span', 'work-trace-twisty', '▾');
   summary.append(timerSpan, twisty);
+  summary.addEventListener('click', () => { trace.dataset.userToggle = 'true'; });
   trace.append(summary);
 
   if (steps.length > 0) {
@@ -464,6 +500,7 @@ function createWorkTraceElement(busy, steps) {
     subgroup.append(subSummary);
 
     const list = element('div', 'work-steps-list');
+    if (attemptId) list.dataset.attemptId = attemptId;
     renderStepList(list, steps);
     subgroup.append(list);
     trace.append(subgroup);
@@ -474,27 +511,22 @@ function createWorkTraceElement(busy, steps) {
 
 function updateActiveAssistantRow(row, message, busy, state, steps) {
   const modelTag = row.querySelector('.model-tag');
-  if (modelTag && state.model) {
-    modelTag.textContent = state.model.split('/').pop();
+  if (modelTag && (message.attempt?.model || state.model)) {
+    modelTag.textContent = (message.attempt?.model || state.model).split('/').pop();
   }
 
   let trace = row.querySelector('.work-trace');
   if (steps.length > 0 || busy) {
     if (!trace) {
-      trace = createWorkTraceElement(busy, steps);
+      trace = createWorkTraceElement(busy, steps, false, message.attempt?.id);
       const body = row.querySelector('.message-body');
       row.insertBefore(trace, body);
     } else {
-      // IN-PLACE UPDATE: Never touch trace.open or subgroup.open! User's toggle state is 100% preserved.
       const timerSpan = trace.querySelector('.work-trace-timer');
       if (timerSpan) {
-        if (busy) {
-          const cur = getCurrentProcess(state, busy);
-          timerSpan.replaceChildren(createDynamicLoadingElement(cur.text));
-        } else {
-          timerSpan.textContent = `Worked for ${formatDuration(lastCompletedDuration ?? 0)}`;
-        }
+        timerSpan.textContent = busy ? 'Activity' : `Worked for ${formatDuration(lastCompletedDuration ?? 0)}`;
       }
+      if (!busy && !trace.dataset.userToggle) trace.open = false;
 
       let subgroup = trace.querySelector('.work-subgroup');
       if (steps.length > 0) {
@@ -512,6 +544,7 @@ function updateActiveAssistantRow(row, message, busy, state, steps) {
           subgroup.append(subSummary);
 
           const list = element('div', 'work-steps-list');
+          if (message.attempt?.id) list.dataset.attemptId = message.attempt.id;
           renderStepList(list, steps);
           subgroup.append(list);
           trace.append(subgroup);
@@ -533,17 +566,27 @@ function updateActiveAssistantRow(row, message, busy, state, steps) {
 
   const body = row.querySelector('.message-body');
   if (body) {
-    const currentText = body.dataset.text || '';
-    if ((message.text || '') !== currentText) {
-      body.dataset.text = message.text || '';
-      body.replaceChildren();
-      if (message.text && message.text.trim()) {
-        renderMessageContent(body, message.text);
-      }
-    }
+    patchStreamingText(body, message.text || '');
   }
 
 }
+
+function patchStreamingText(body, text) {
+  if (body.dataset.text === text) return;
+  const selection = document.getSelection();
+  if (selection && !selection.isCollapsed && (body.contains(selection.anchorNode) || body.contains(selection.focusNode))) {
+    body.dataset.pendingText = text;
+    return;
+  }
+  delete body.dataset.pendingText;
+  body.dataset.text = text;
+  body.replaceChildren();
+  if (text.trim()) renderMessageContent(body, text);
+}
+
+document.addEventListener('selectionchange', () => {
+  for (const body of document.querySelectorAll('.message-body[data-pending-text]')) patchStreamingText(body, body.dataset.pendingText);
+});
 
 function buildMessageRow(message, idx, isLast, busy, state, steps) {
   const isUser = message.role === 'user';
@@ -556,11 +599,11 @@ function buildMessageRow(message, idx, isLast, busy, state, steps) {
     agentIcon.innerHTML = SVG_ICONS.zap;
     avatar.append(agentIcon, element('span', '', 'Little Forge'));
     header.append(avatar);
-    if (state.model) {
-      header.append(element('span', 'model-tag', state.model.split('/').pop()));
+    if (message.attempt?.model || state.model) {
+      header.append(element('span', 'model-tag', (message.attempt?.model || state.model).split('/').pop()));
     }
     const copy = element('details', 'reply-copy');
-    const copyStatus = element('summary', '', 'Copy reply');
+    const copyStatus = element('summary', '', 'Reply actions');
     const actions = element('div', 'reply-copy-actions');
     for (const [label, transform] of [['Markdown', text => text], ['Plain text', plainResponse]]) {
       actions.append(button(label, 'small-button', async () => {
@@ -570,31 +613,137 @@ function buildMessageRow(message, idx, isLast, busy, state, steps) {
           copyStatus.textContent = 'Copied';
         } catch { copyStatus.textContent = 'Copy failed'; }
         copy.open = false;
-        setTimeout(() => { copyStatus.textContent = 'Copy reply'; }, 2000);
+        setTimeout(() => { copyStatus.textContent = 'Reply actions'; }, 2000);
+      }));
+    }
+    actions.append(messageBranchButton(row, copy));
+    if (message.attempt?.id) {
+      actions.append(button('Share summary', 'small-button', () => {
+        copy.open = false;
+        send('shareRunSummary', { attemptId: message.attempt.id });
       }));
     }
     copy.append(copyStatus, actions);
     header.append(copy);
     row.append(header);
 
-    if ((steps.length > 0 || busy) && isLast) {
-      row.append(createWorkTraceElement(busy, steps));
-    }
+    if (message.attempt?.label) row.append(element('p', 'attempt-marker', message.attempt.label));
+    if (steps.length > 0 || (busy && isLast)) row.append(createWorkTraceElement(busy && isLast, steps, !isLast, message.attempt?.id));
   }
 
   const body = element('div', 'message-body');
+  if (!isUser) body.dataset.timelineKind = 'message';
   body.dataset.text = message.text || '';
   if (isUser) body.textContent = message.text || '';
   else if (message.text && message.text.trim()) renderMessageContent(body, message.text);
   row.append(body);
+  if (isUser) {
+    const actions = element('details', 'user-message-actions');
+    const trigger = element('summary', '', '···');
+    trigger.setAttribute('aria-label', 'Message actions');
+    const menu = element('div', 'reply-copy-actions');
+    menu.append(messageBranchButton(row, actions));
+    actions.append(trigger, menu);
+    row.append(actions);
+  }
 
 
   return row;
 }
 
+function messageBranchButton(row, menu) {
+  const branch = button('Branch from here', 'small-button branch-action', () => {
+    if (isRunning() || state.auxiliary) return;
+    menu.open = false;
+    send('branchConversation', { id: state.activeConversationId, messageIndex: Number(row.dataset.messageIndex) });
+  });
+  return branch;
+}
+
+function renderAttemptEnd(row, attempt, activeError, busy) {
+  const error = activeError ? undefined : attempt?.error;
+  const receipt = attempt?.id !== state.evidence?.id ? attempt?.receipt : undefined;
+  const checkpoints = receipt?.reviews.map(review => state.checkpoints.find(item => item.id === review.checkpointId)?.state);
+  const summary = attempt && !busy ? attemptOutcome(attempt, receipt) : undefined;
+  const signature = JSON.stringify([error, receipt, checkpoints, busy && !!receipt, attempt?.context, attempt?.workflow, attempt?.branch, summary]);
+  if (row.dataset.attemptEnd === signature) return;
+  row.dataset.attemptEnd = signature;
+  const previousEnd = row.querySelector('.attempt-end');
+  const open = new Set([...previousEnd?.querySelectorAll('details[open] > summary') ?? []].map(item => item.textContent));
+  previousEnd?.remove();
+  if (!attempt) return;
+  const end = element('div', 'attempt-end');
+  const label = [attempt.workflow ? workflowLabel(attempt.workflow) : '', attempt.workspace, attempt.branch].filter(Boolean).join(' · ');
+  if (label) end.append(element('p', 'attempt-meta', label));
+  if (summary) end.append(element('p', 'attempt-meta', summary));
+  if (attempt.context) {
+    const context = element('details', 'sent-context');
+    const { chunks, omitted, usedTokens, budgetTokens, truncated } = attempt.context;
+    context.append(element('summary', '', `Context sent · ${chunks.length} excerpt${chunks.length === 1 ? '' : 's'}`));
+    context.append(element('p', 'check-note', `${usedTokens.toLocaleString()} of ${budgetTokens.toLocaleString()} estimated units${truncated ? ' · excerpts trimmed' : ''}`));
+    for (const chunk of chunks) {
+      const item = element('div', 'context-chip');
+      item.append(button(`${chunk.path} · L${chunk.startLine}–${chunk.endLine}`, 'receipt-action', () =>
+        send('openSource', { path: chunk.path, line: chunk.startLine, endLine: chunk.endLine, attemptId: attempt.id })),
+      element('p', 'check-note', chunk.reason));
+      context.append(item);
+    }
+    for (const item of omitted ?? []) context.append(element('p', 'check-note', `${item.path} · ${item.reason}`));
+    end.append(context);
+  }
+  if (receipt) {
+    for (const review of receipt.reviews) {
+      const openDiff = review.checkpointId ? path => send('showArchivedDiff', { attemptId: attempt.id, reviewId: review.id, path }) : undefined;
+      end.append(makeReviewReceipt(review.state, review.paths, openDiff, review.checkpointId, busy));
+    }
+    end.append(...renderVerificationReceipts(receipt.checks, index => send('showArchivedCheck', { attemptId: attempt.id, index })));
+    for (const command of receipt.commands) {
+      if (command.status === 'denied' || command.status === 'unconfirmed') {
+        end.append(makeCommandReceipt(command, receipt.checks));
+      }
+    }
+  } else if (error) {
+    for (const edit of attempt.edits ?? []) {
+      end.append(element('p', 'attempt-marker', `Applied ${edit.paths.length} ${edit.paths.length === 1 ? 'file' : 'files'}`));
+    }
+  }
+  if (error) {
+    const details = element('details', 'attempt-marker');
+    details.dataset.timelineKind = 'errors';
+    details.append(element('summary', '', 'Attempt interrupted'), element('p', '', error));
+    end.append(details);
+  }
+  for (const item of end.querySelectorAll('details > summary')) if (open.has(item.textContent)) item.parentElement.open = true;
+  row.append(end);
+}
+
+function workflowLabel(mode) {
+  return { ask: 'Ask', plan: 'Plan', build: 'Build', inline: 'Edit selection' }[mode] ?? mode;
+}
+
+function attemptOutcome(attempt, receipt) {
+  const status = { completed: 'Completed', failed: 'Interrupted', cancelled: 'Stopped' }[attempt.status];
+  if (!status) return undefined;
+  const live = state.evidence?.id === attempt.id ? state.evidence : undefined;
+  const checks = live?.checks ?? receipt?.checks ?? [];
+  const edits = live?.edits ?? receipt?.reviews.filter(item => item.state === 'applied') ?? [];
+  const files = new Set(edits.flatMap(edit => edit.paths)).size;
+  const passed = checks.filter(checkPassed).length;
+  return [status, files ? `${files} applied ${files === 1 ? 'file' : 'files'}` : 'No files applied',
+    checks.length ? `${passed}/${checks.length} checks passed` : 'No verification recorded'].join(' · ');
+}
+
 const fileReviewOpen = new Map();
 let reviewSignature;
-let activeApproval;
+let selectedHunk;
+let pendingHunksOnly = false;
+let submittedProposal;
+
+function applyReview(proposalId) {
+  if (submittedProposal === proposalId) return;
+  submittedProposal = proposalId;
+  send('apply', { proposalId });
+}
 function activeReview() {
   return state.proposals.find(proposal => proposal.state === 'pending' && state.approvals.some(a => a.name === 'apply_proposal' && a.args?.proposalId === proposal.id));
 }
@@ -605,9 +754,13 @@ function reviewSummary(proposal) {
   return counts;
 }
 
-function nextHunk() {
+function nextHunk(direction = 1) {
   const id = activeReview()?.id;
-  const group = [...document.querySelectorAll('#review-list .hunk[data-decision="pending"]')].find(hunk => hunk.dataset.proposalId === id);
+  const rows = [...document.querySelectorAll('#review-list .hunk')].filter(hunk => hunk.dataset.proposalId === id);
+  if (direction < 0) rows.reverse();
+  const previous = rows.findIndex(row => row.dataset.hunkId === selectedHunk);
+  const ordered = [...rows.slice(previous + 1), ...rows.slice(0, previous + 1)];
+  const group = ordered.find(row => row.dataset.decision === 'pending');
   if (!group) return;
   group.closest('details').open = true;
   group.scrollIntoView({ block: 'center' });
@@ -616,78 +769,104 @@ function nextHunk() {
 
 function renderReview() {
   const current = activeReview();
+  const disconnected = state.recovery?.kind === 'reconnect';
   const bar = $('review-bar');
-  bar.hidden = !current;
+  const commandCount = state.approvals.filter(item => item.name === 'run_command' && !state.commandReceipts?.some(receipt => receipt.id === item.toolCallId)).length;
+  bar.hidden = !current && !commandCount;
+  $('review-commands').hidden = !commandCount;
+  $('review-commands').textContent = `Review ${commandCount} command${commandCount === 1 ? '' : 's'}`;
+  for (const id of ['open-review-diff', 'next-hunk', 'prev-hunk', 'sticky-apply']) $(id).hidden = !current;
+  if (!current) $('review-count').textContent = commandCount ? 'Approval needed' : '';
   if (current) {
     const counts = reviewSummary(current);
-    $('review-count').textContent = `${counts.accept} accepted · ${counts.reject} rejected · ${counts.pending} pending`;
-    $('next-hunk').disabled = !counts.pending;
+    const pending = current.files.flatMap(file => file.hunks).filter(hunk => hunk.decision === 'pending');
+    const index = pending.findIndex(hunk => hunk.id === selectedHunk);
+    $('review-count').textContent = index >= 0 ? `Pending hunk ${index + 1} of ${pending.length}`
+      : `${counts.accept} accepted · ${counts.reject} rejected · ${counts.pending} pending`;
+    $('next-hunk').disabled = $('prev-hunk').disabled = !counts.pending;
     $('sticky-apply').textContent = counts.accept ? 'Apply' : 'Finish';
-    $('sticky-apply').disabled = !!(counts.pending || state.auxiliary || (counts.accept && state.stale?.proposalId === current.id));
+    $('sticky-apply').disabled = !!(disconnected || counts.pending || state.auxiliary || (counts.accept && state.stale?.proposalId === current.id));
   }
-  const signature = JSON.stringify([state.proposals, current?.id, state.auxiliary, state.stale, state.verification?.proposalId, state.impactResults]);
+  const signature = JSON.stringify([state.proposals, current?.id, state.auxiliary, state.stale, state.verification?.proposalId, state.impactResults, state.evidence?.edits, state.checkpoints, state.status, pendingHunksOnly]);
   if (signature === reviewSignature) return;
   reviewSignature = signature;
   const list = $('review-list');
   const currentKeys = new Set(state.proposals.flatMap(proposal => proposal.files.map(file => `${proposal.id}:${file.path}`)));
   for (const key of fileReviewOpen.keys()) if (!currentKeys.has(key)) fileReviewOpen.delete(key);
   const focus = list.contains(document.activeElement) ? document.activeElement.dataset.reviewFocus : undefined;
-  const activeProposals = state.proposals.filter(proposal => !dismissedProposals.has(proposal.id));
-  list.replaceChildren(...activeProposals.map(proposal => {
+  const previousProposal = list.contains(document.activeElement) ? document.activeElement.closest('[data-proposal-id]')?.dataset.proposalId : undefined;
+  list.replaceChildren(...state.proposals.map(proposal => {
+    if (proposal.state !== 'pending') return renderReviewReceipt(proposal);
     const section = element('section', 'review');
-    const editable = proposal.state === 'pending' && !state.auxiliary;
+    section.dataset.timelineKind = 'edits approvals';
+    section.dataset.actionRequired = 'true';
+    section.dataset.proposalId = proposal.id;
+    const editable = !state.auxiliary && !disconnected;
     const counts = reviewSummary(proposal);
     const head = element('div', 'review-header');
-    const status = { pending: 'Staged', applied: 'Applied', rejected: 'Rejected', expired: 'Expired' }[proposal.state];
-    head.append(element('strong', '', 'Review changes'), element('small', `outcome-${proposal.state}`, `${proposal.files.length} ${proposal.files.length === 1 ? 'file' : 'files'} · ${status}`));
-    const dismissReview = () => {
-      dismissedProposals.add(proposal.id);
-      section.remove();
-    };
-    if (proposal.state !== 'pending') {
-      const dismissBtn = button('', 'card-dismiss-btn', dismissReview);
-      dismissBtn.title = 'Dismiss review';
-      dismissBtn.innerHTML = SVG_ICONS.close;
-      head.append(dismissBtn);
-    }
+    head.append(element('strong', '', 'Review changes'), element('small', 'outcome-pending', `${proposal.files.length} ${proposal.files.length === 1 ? 'file' : 'files'} · Staged`));
     section.append(head, element('p', 'review-progress', `${counts.accept} accepted · ${counts.reject} rejected · ${counts.pending} pending`));
     const layout = element('div', 'review-actions');
-    if (proposal.state === 'pending') {
-      layout.append(
-        button('Accept all', 'small-button', () => send('acceptAllHunks', { proposalId: proposal.id }), !editable),
-        button('Second opinion', 'small-button', () => send('reviewPatch', { proposalId: proposal.id }), !editable || current?.id !== proposal.id),
-      );
-    }
-    if ((proposal.state === 'pending' || proposal.state === 'applied') && state.verification?.proposalId !== proposal.id) {
-      layout.append(button('Select checks', 'small-button', () => send('planChecks', { proposalId: proposal.id }), !!state.auxiliary || (proposal.state === 'pending' && current?.id !== proposal.id)));
+    const toggle = button('Pending only', 'small-button', () => {
+      pendingHunksOnly = !pendingHunksOnly;
+      renderReview();
+      list.querySelector('[data-review-focus="pending-only"]')?.focus();
+    });
+    toggle.dataset.reviewFocus = 'pending-only';
+    toggle.setAttribute('aria-pressed', String(pendingHunksOnly));
+    layout.append(toggle);
+    layout.append(
+      button('Accept all', 'small-button', () => send('acceptAllHunks', { proposalId: proposal.id }), !editable),
+      button('Second opinion', 'small-button', () => send('reviewPatch', { proposalId: proposal.id }), !editable || current?.id !== proposal.id),
+    );
+    if (state.verification?.proposalId !== proposal.id) {
+      layout.append(button('Select checks', 'small-button', () => send('planChecks', { proposalId: proposal.id }), !editable || current?.id !== proposal.id));
     }
     const stale = state.stale?.proposalId === proposal.id;
-    if (stale || proposal.state === 'expired') {
-      if (stale) section.append(element('p', 'review-note', `Changed since staging: ${state.stale.paths.join(', ')}`));
+    if (stale) {
+      section.append(element('p', 'review-note', `Changed since staging: ${state.stale.paths.join(', ')}`));
       layout.append(button('Refresh proposal', 'small-button', () => send('refreshStale', { proposalId: proposal.id }), !!state.auxiliary));
+      for (const file of state.stale.paths) layout.append(button(`Compare ${file}`, 'receipt-action', () => send('previewStale', { proposalId: proposal.id, path: file })));
     }
     section.append(layout);
-    for (const file of proposal.files) {
+    for (const [fileIndex, file] of proposal.files.entries()) {
       const pending = file.hunks.filter(hunk => hunk.decision === 'pending').length;
+      if (pendingHunksOnly && !pending) continue;
       const key = `${proposal.id}:${file.path}`;
       const group = element('details', `review-file${pending ? ' has-pending' : ''}`);
-      group.open = fileReviewOpen.get(key) ?? pending > 0;
+      group.open = fileReviewOpen.get(key) ?? (fileIndex === 0 && pending > 0);
       group.addEventListener('toggle', () => fileReviewOpen.set(key, group.open));
       group.append(element('summary', 'review-file-label', `${file.path} · ${pending} pending`));
-      group.append(button('Open diff ↗', 'small-button review-diff', () => send('preview', { proposalId: proposal.id, path: file.path })));
+      group.append(button('Open file diff', 'receipt-action review-diff', () => send('preview', { proposalId: proposal.id, path: file.path })));
+      if (pending) {
+        const bulk = element('div', 'hunk-actions');
+        for (const decision of ['accept', 'reject']) {
+          bulk.append(button(`${decision === 'accept' ? 'Accept' : 'Reject'} ${pending} in file`, 'small-button', () =>
+            send('decideFile', { proposalId: proposal.id, path: file.path, decision }), !editable));
+        }
+        group.append(bulk);
+      }
+      let scannedOffset = 0;
+      let line = 1;
+      const original = file.original ?? '';
       for (const [i, hunk] of file.hunks.entries()) {
-        const line = (file.original || '').slice(0, hunk.start).split('\n').length;
+        line += original.slice(scannedOffset, hunk.start).split('\n').length - 1;
+        scannedOffset = hunk.start;
+        if (pendingHunksOnly && hunk.decision !== 'pending') continue;
         const row = element('div', 'hunk');
         row.tabIndex = -1;
         row.dataset.decision = hunk.decision;
         row.dataset.hunkId = hunk.id;
         row.dataset.proposalId = proposal.id;
         row.dataset.reviewFocus = hunk.id;
+        row.addEventListener('focusin', () => { selectedHunk = hunk.id; renderReview(); });
         const label = element('div', 'hunk-label');
-        label.append(element('span', '', `Hunk ${i + 1} · Line ${line}`), element('span', '', hunk.decision));
+        const openHunk = button(`Hunk ${i + 1} · Line ${hunk.line ?? line}`, 'receipt-action',
+          () => send('preview', { proposalId: proposal.id, path: file.path, hunkId: hunk.id }));
+        openHunk.title = 'Open this hunk in the VS Code diff editor';
+        openHunk.dataset.reviewFocus = `${hunk.id}:preview`;
+        label.append(openHunk, element('span', '', hunk.decision));
         row.append(label);
-        if (hunk.before) row.append(element('pre', 'before', hunk.before));
-        if (hunk.after) row.append(element('pre', 'after', hunk.after));
         const actions = element('div', 'hunk-actions');
         for (const decision of ['reject', 'accept']) {
           const choice = button(decision === 'accept' ? 'Accept' : 'Reject', `small-button ${hunk.decision === decision ? decision + 'ed' : ''}`, () => send('decide', { proposalId: proposal.id, hunkId: hunk.id, decision }), !editable);
@@ -703,45 +882,120 @@ function renderReview() {
       section.append(group);
     }
     const footer = element('div', 'review-footer');
-    if (proposal.state === 'pending') {
-      footer.append(button(counts.accept ? 'Apply selected hunks' : 'Finish review', 'primary wide', () => send('apply', { proposalId: proposal.id }), current?.id !== proposal.id || !!counts.pending || !editable || (!!counts.accept && stale)));
-      footer.append(button('Reject all remaining', 'mention-button', () => send('rejectRemaining', { proposalId: proposal.id }), !editable));
-    } else {
-      const resolvedRow = element('div', 'review-resolved-row');
-      const resolvedMsg = element('div', `review-resolved-msg ${proposal.state}`);
-      resolvedMsg.innerHTML = proposal.state === 'applied'
-        ? `<span class="icon-inline">${SVG_ICONS.check}</span> Changes applied to workspace`
-        : `<span class="icon-inline">${SVG_ICONS.close}</span> ${proposal.state === 'expired' ? 'Review expired' : 'Proposed changes rejected'}`;
-
-      const dismissActionBtn = button('Dismiss', 'review-dismiss-action', dismissReview);
-      dismissActionBtn.title = 'Dismiss review';
-      resolvedRow.append(resolvedMsg, dismissActionBtn);
-      footer.append(resolvedRow);
-    }
+    footer.append(button(counts.accept ? 'Apply selected hunks' : 'Finish review', 'primary wide', () => applyReview(proposal.id), current?.id !== proposal.id || !!counts.pending || !editable || (!!counts.accept && stale)));
+    footer.append(button('Reject all remaining', 'mention-button', () => send('rejectRemaining', { proposalId: proposal.id }), !editable));
     section.append(footer);
     return section;
   }));
-  if (focus) Array.from(list.querySelectorAll('[data-review-focus]')).find(node => node.dataset.reviewFocus === focus)?.focus({ preventScroll: true });
-  if (current?.id !== activeApproval) {
-    activeApproval = current?.id;
-    if (current && document.hasFocus() && !focus) requestAnimationFrame(nextHunk);
+  const restored = focus && Array.from(list.querySelectorAll('[data-review-focus]')).find(node => node.dataset.reviewFocus === focus);
+  if (restored) restored.focus({ preventScroll: true });
+  else if (previousProposal) {
+    const receipt = [...list.children].find(node => node.dataset.proposalId === previousProposal && node.classList.contains('action-receipt'));
+    if (receipt) receipt.focus({ preventScroll: true });
+    else nextHunk();
   }
+  if (submittedProposal && !state.proposals.some(item => item.id === submittedProposal && item.state === 'pending')) {
+    [...list.children].find(node => node.dataset.proposalId === submittedProposal)?.focus({ preventScroll: true });
+    submittedProposal = undefined;
+  }
+  if (state.stale || state.error) submittedProposal = undefined;
+}
+
+function renderReviewReceipt(proposal) {
+  const edit = state.evidence?.edits.find(item => item.proposalId === proposal.id);
+  const paths = proposal.state === 'applied'
+    ? (edit?.paths ?? proposal.files.filter(file => file.hunks.some(hunk => hunk.decision === 'accept')).map(file => file.path))
+    : proposal.files.map(file => file.path);
+  const receipt = makeReviewReceipt(proposal.state, paths, path => send('preview', { proposalId: proposal.id, path }), edit?.checkpointId, isRunning() || !!state.auxiliary);
+  receipt.dataset.proposalId = proposal.id;
+  if (proposal.state === 'expired') receipt.append(button('Refresh proposal', 'receipt-action', () => send('refreshStale', { proposalId: proposal.id }), !!state.auxiliary));
+  if (proposal.state === 'applied' && !state.verification) {
+    receipt.append(button('Select checks', 'receipt-action', () => send('planChecks', { proposalId: proposal.id }), !!state.auxiliary));
+  }
+  return receipt;
+}
+
+function makeReviewReceipt(status, paths, openDiff, checkpointId, busy) {
+  const receipt = element('div', 'action-receipt');
+  receipt.dataset.timelineKind = 'edits approvals';
+  receipt.tabIndex = -1;
+  const title = status === 'applied' ? `Applied ${paths.length} ${paths.length === 1 ? 'file' : 'files'}`
+    : status === 'rejected' ? 'Changes rejected' : 'Review expired';
+  const icon = element('span', 'receipt-icon');
+  icon.innerHTML = status === 'applied' ? SVG_ICONS.check : SVG_ICONS.close;
+  icon.setAttribute('aria-hidden', 'true');
+  receipt.append(icon, element('strong', '', title));
+  if (openDiff && paths.length === 1) {
+    receipt.append(button('View diff', 'receipt-action', () => openDiff(paths[0])));
+  } else if (openDiff && paths.length > 1) {
+    const diffs = element('details', 'receipt-diffs');
+    diffs.append(element('summary', 'receipt-action', 'View diffs'));
+    for (const path of paths) diffs.append(button(path, 'receipt-action', () => openDiff(path)));
+    receipt.append(diffs);
+  }
+  if (checkpointId && state.checkpoints.some(cp => cp.id === checkpointId && ['applied', 'restore-conflict'].includes(cp.state))) {
+    receipt.append(button('Undo', 'receipt-action', () => send('undo', { id: checkpointId }), busy));
+  }
+  return receipt;
 }
 
 const checkName = input => [input.task, ...(input.args ?? [])].join(' ');
 const checkPassed = check => check.result.exitCode === 0 && !check.result.timedOut && !check.result.cancelled && check.result.cleanupConfirmed;
-function checkStatus(check, checks) {
-  if (check.result.cancelled) return 'Cancelled';
-  if (check.result.timedOut) return 'Timed out';
-  if (check.result.exitCode === null) return 'Could not finish';
-  const passed = checkPassed(check);
-  const previous = check.phase === 'after' ? checks.find(candidate => candidate.phase === 'baseline' && checkName(candidate.input) === checkName(check.input)) : undefined;
-  if (previous && previous.result.exitCode !== null && !previous.result.cancelled && !previous.result.timedOut) {
-    if (!passed && checkPassed(previous)) return 'New failure';
-    if (!passed) return 'Failed before and after';
-    if (!checkPassed(previous)) return 'Now passing';
-  }
-  return passed ? 'Passed' : 'Failed';
+function appendCheckDetails(container, check, showOutput, includePreview) {
+  container.append(element('p', '', `Exit ${check.result.exitCode ?? 'unavailable'} · ${(check.durationMs / 1000).toFixed(1)}s`));
+  if (check.changedSource.length) container.append(element('p', 'check-note', `Detected source changes: ${check.changedSource.join(', ')}`));
+  if (check.detectionPartial) container.append(element('p', 'check-note', 'Source-change detection was partial.'));
+  if (check.result.truncated) container.append(element('p', 'check-note', 'Captured output was truncated.'));
+  const text = includePreview && [check.result.stdout, check.result.stderr].filter(Boolean).join('\n');
+  if (text) container.append(element('pre', 'code-block-content', text.slice(0, 8000)));
+  container.append(button('Open captured output', 'receipt-action', showOutput));
+}
+
+function renderCheckReceipt(check, showOutput, includePreview, comparison) {
+  const details = element('details', 'check-output check-receipt');
+  details.dataset.timelineKind = 'checks';
+  const phase = { baseline: 'Baseline', after: 'After changes', agent: 'Agent check' }[check.phase];
+  const summary = element('summary', 'check-summary');
+  const command = element('strong', 'check-command', `${phase} · ${formatCommandString(check.input)}`);
+  command.title = command.textContent;
+  summary.append(command, element('span', checkPassed(check) ? 'outcome-applied' : 'outcome-rejected', checkResult(check)));
+  details.append(summary);
+  if (comparison) details.append(element('p', 'check-note', comparison));
+  appendCheckDetails(details, check, showOutput, includePreview);
+  return details;
+}
+
+function renderVerificationReceipts(checks, showOutput, includePreview = false, excluded = new Set()) {
+  const comparisons = compareVerification(checks);
+  const pairsByAfter = new Map(comparisons.filter(pair => pair.after !== undefined).map(pair => [pair.after, pair]));
+  const pairedBaselines = new Set(comparisons.filter(pair => pair.after !== undefined).map(pair => pair.baseline));
+  const missingAfter = new Set(comparisons.filter(pair => pair.after === undefined).map(pair => pair.baseline));
+  return checks.flatMap((check, index) => {
+    if (excluded.has(index) || pairedBaselines.has(index)) return [];
+    const pair = pairsByAfter.get(index);
+    if (pair?.baseline === undefined) {
+      const receipt = renderCheckReceipt(check, () => showOutput(index), includePreview,
+        pair?.label ?? (missingAfter.has(index) ? 'After check missing' : undefined));
+      receipt.dataset.index = String(index);
+      return [receipt];
+    }
+    const comparison = element('details', 'check-output check-receipt check-comparison');
+    comparison.dataset.timelineKind = 'checks';
+    comparison.dataset.index = String(index);
+    const summary = element('summary', 'check-summary');
+    summary.append(element('strong', 'check-command', formatCommandString(check.input)),
+      element('span', checkPassed(check) ? 'outcome-applied' : 'outcome-rejected', pair.label));
+    const results = element('div', 'comparison-results');
+    for (const [label, checkIndex] of [['Baseline', pair.baseline], ['After changes', index]]) {
+      const record = checks[checkIndex];
+      const phase = element('section', 'comparison-phase');
+      phase.append(element('strong', '', `${label} · ${checkResult(record)}`));
+      appendCheckDetails(phase, record, () => showOutput(checkIndex), includePreview);
+      results.append(phase);
+    }
+    comparison.append(summary, results);
+    return [comparison];
+  });
 }
 
 let evidenceSignature;
@@ -751,7 +1005,7 @@ function renderEvidence() {
   const proposal = state.proposals.find(item => item.id === state.verification?.proposalId);
   const evidence = state.evidence;
   const plan = state.verification;
-  const signature = JSON.stringify([review, evidence, plan, proposal?.state, state.auxiliary, state.status]);
+  const signature = JSON.stringify([review, evidence, plan, proposal?.state, state.auxiliary, state.status, state.commandReceipts]);
   if (signature === evidenceSignature) return;
   evidenceSignature = signature;
   const report = $('review-report');
@@ -779,27 +1033,19 @@ function renderEvidence() {
     output.append(card);
   }
   const checks = evidence?.checks ?? [];
-  for (const [index, check] of checks.entries()) {
-    const details = element('details', 'evidence-card check-output');
-    details.dataset.index = String(index);
+  const recordedCommands = new Set(state.commandReceipts?.map(item => item.checkIndex));
+  for (const details of renderVerificationReceipts(checks, index => send('showCheck', { index }), true, recordedCommands)) {
     details.open = openChecks.has(details.dataset.index);
-    const phase = { baseline: 'Baseline', after: 'After changes', agent: 'Agent check' }[check.phase];
-    const status = checkStatus(check, checks);
-    const summary = element('summary', 'check-summary');
-    summary.append(element('strong', '', `${phase} · ${checkName(check.input)}`), element('span', checkPassed(check) ? 'outcome-applied' : 'outcome-rejected', status));
-    details.append(summary, element('p', '', `Exit ${check.result.exitCode ?? 'unavailable'} · ${(check.durationMs / 1000).toFixed(1)}s`));
-    if (check.changedSource.length) details.append(element('p', 'review-note', `Detected source changes: ${check.changedSource.join(', ')}`));
-    if (check.result.truncated || check.detectionPartial) details.append(element('p', 'review-note', check.result.truncated ? 'Output truncated by the command runner.' : 'Source-change detection was partial.'));
-    const text = [check.result.stdout, check.result.stderr].filter(Boolean).join('\n');
-    if (text) details.append(element('pre', 'code-block-content', text.slice(0, 8000)));
-    details.append(button('Open captured output', 'small-button', () => send('showCheck', { index })));
     output.append(details);
   }
   const result = $('run-evidence');
   result.replaceChildren();
   if (!evidence) return;
-  const card = element('section', 'forgeproof-card');
-  card.append(element('strong', 'forgeproof-title', 'ForgeProof'));
+  const openEvidence = result.dataset.expanded === 'true';
+  const card = element('details', 'forgeproof-card');
+  card.open = openEvidence;
+  card.addEventListener('toggle', () => { result.dataset.expanded = String(card.open); });
+  card.append(element('summary', 'forgeproof-title', 'Run evidence'));
   const after = checks.filter(check => check.phase !== 'baseline');
   const edited = [...new Set(evidence.edits.flatMap(edit => edit.paths))];
   const staged = state.proposals.filter(item => item.state === 'pending').flatMap(item => item.files.map(file => file.path));
@@ -817,6 +1063,9 @@ function renderEvidence() {
   card.append(files);
   const actions = element('div', 'review-actions');
   actions.append(button('Export receipt', 'small-button', () => send('exportEvidence')));
+  if (state.messages.some(message => message.attempt?.id === evidence.id)) {
+    actions.append(button('Share summary', 'small-button', () => send('shareRunSummary', { attemptId: evidence.id })));
+  }
   if (edited.length && evidence.finishedAt) actions.append(button('Prepare draft PR', 'small-button', () => send('draftPullRequest'), !!state.auxiliary));
   card.append(actions);
   result.append(card);
@@ -868,19 +1117,239 @@ function statusLabel() {
   })[state.status] || state.status;
 }
 
+let commandSignature;
+function makeCommandReceipt(receipt, checks, showOutput) {
+  const row = element('div', 'action-receipt command-receipt');
+  row.dataset.commandId = receipt.id;
+  row.dataset.timelineKind = 'approvals checks';
+  row.tabIndex = -1;
+  const check = checks[receipt.checkIndex];
+  const status = check ? checkResult(check) : {
+    allowed: 'Allowed', denied: 'Denied', running: 'Running', finished: 'Finished', unconfirmed: 'Outcome unconfirmed',
+  }[receipt.status];
+  const icon = element('span', 'receipt-icon');
+  icon.innerHTML = SVG_ICONS.terminal;
+  icon.setAttribute('aria-hidden', 'true');
+  const label = element('span', check && checkPassed(check) ? 'outcome-applied' : '', status);
+  const command = formatCommandString(receipt.args);
+  const code = element('code', 'receipt-command', command);
+  code.title = command;
+  row.append(icon, code, label);
+  if (check && showOutput) {
+    const output = button('Output', 'receipt-action', showOutput);
+    output.title = `Exit ${check.result.exitCode ?? 'unavailable'}${check.detectionPartial ? ' · Source-change detection was partial' : ''}`;
+    row.append(output);
+    const text = [check.result.stdout, check.result.stderr].filter(Boolean).join('\n');
+    if (text) {
+      const preview = element('details', 'command-output-preview');
+      preview.append(element('summary', '', 'Preview'), element('pre', 'code-block-content', text.slice(0, 1200)));
+      row.append(preview);
+    }
+  }
+  return row;
+}
+function renderCommands() {
+  const list = $('command-list');
+  const receipts = state.commandReceipts ?? [];
+  const pending = state.approvals.filter(approval => approval.name === 'run_command' && !receipts.some(item => item.id === approval.toolCallId));
+  for (const id of submittedCommands) if (!pending.some(approval => approval.toolCallId === id)) submittedCommands.delete(id);
+  const checks = state.evidence?.checks ?? [];
+  const signature = JSON.stringify([receipts, pending, [...submittedCommands], state.commandPreviews, state.recovery?.kind === 'reconnect']);
+  if (signature === commandSignature) return;
+  commandSignature = signature;
+  const focusedId = list.contains(document.activeElement) ? document.activeElement.closest('[data-command-id]')?.dataset.commandId : undefined;
+  const cards = pending.map(approval => {
+    const card = element('section', 'command-card');
+    card.dataset.commandId = approval.toolCallId;
+    card.dataset.timelineKind = 'approvals';
+    card.dataset.actionRequired = 'true';
+    const preview = state.commandPreviews?.[approval.toolCallId];
+    const command = preview?.command ?? formatCommandString(approval.args);
+    const header = element('div', 'command-card-header');
+    header.append(element('strong', 'command-card-title', 'Allow this workspace command?'));
+    const cli = element('div', 'command-cli-box');
+    const commandLine = element('div', 'command-cli-line');
+    commandLine.append(element('code', 'command-cli-code', command));
+    const copy = button('Copy', 'command-copy-btn', async () => {
+      try {
+        await navigator.clipboard.writeText(command);
+        copy.textContent = 'Copied';
+      } catch {
+        copy.textContent = 'Copy failed';
+      }
+    });
+    copy.setAttribute('aria-label', 'Copy command');
+    cli.append(commandLine, copy);
+    const actions = element('div', 'command-actions');
+    const decide = allow => {
+      if (submittedCommands.has(approval.toolCallId)) return;
+      submittedCommands.add(approval.toolCallId);
+      send('commandDecision', { toolCallId: approval.toolCallId, allow });
+      renderCommands();
+    };
+    if (submittedCommands.has(approval.toolCallId)) {
+      actions.append(element('span', '', 'Submitting decision…'));
+    } else {
+      const disconnected = state.recovery?.kind === 'reconnect';
+      actions.append(button('Deny', 'command-action-btn command-deny-btn', () => decide(false), disconnected),
+        button('Allow once', 'command-action-btn command-allow-btn', () => decide(true), disconnected || (!!preview && !preview.command)));
+    }
+    card.tabIndex = -1;
+    const cwd = preview?.cwd ?? (typeof approval.args?.cwd === 'string' ? approval.args.cwd : '.');
+    card.append(header, cli, element('p', 'command-security-row', `Working directory: ${cwd} · Approval applies to this request`));
+    if (preview && !preview.command) card.append(element('p', 'check-note', preview.error ?? 'Checking the workspace command…'));
+    card.append(actions);
+    return card;
+  });
+  const rows = receipts.map(receipt => makeCommandReceipt(receipt, checks, () => send('showCheck', { index: receipt.checkIndex })));
+  list.replaceChildren(...rows, ...cards);
+  if (focusedId) [...list.children].find(row => row.dataset.commandId === focusedId)?.focus({ preventScroll: true });
+}
+
+let recoverySignature;
+let submittedRecovery;
+function renderRecovery() {
+  const dock = $('error');
+  const limit = state.status === 'cancelled' ? state.evidence?.stopReason : undefined;
+  dock.hidden = !state.error && !limit;
+  if (dock.hidden) {
+    recoverySignature = undefined;
+    submittedRecovery = undefined;
+    return;
+  }
+  const recovery = state.recovery;
+  const selected = state.model !== recovery?.model && !!state.model;
+  const ready = recovery?.notBefore && Date.now() >= recovery.notBefore;
+  const signature = JSON.stringify([state.error, limit, recovery, selected, ready, submittedRecovery, state.status, state.evidence?.edits, state.evidence?.checks.length]);
+  if (signature === recoverySignature) return;
+  recoverySignature = signature;
+  $('error-title').textContent = recovery?.title ?? (limit ? 'Run limit reached' : 'Needs attention');
+  $('error-text').textContent = state.error ?? limit;
+  const last = [...state.activity].reverse().find(item => /^(read file:|edited file:|ran command:|staged file:)/.test(item));
+  const details = [recovery?.model ? `Model: ${recovery.model}` : '', recovery?.status ? `HTTP ${recovery.status}` : '',
+    state.evidence && `${new Set(state.evidence.edits.flatMap(edit => edit.paths)).size} files applied`,
+    state.evidence && `${state.evidence.checks.length} completed checks recorded`, last ? `Last recorded step: ${last}` : ''];
+  $('error-progress').textContent = details.filter(Boolean).join(' · ');
+  $('copy-diagnostic').hidden = !state.error;
+  if (submittedRecovery !== recovery?.id) $('error-details').open = !recovery;
+  const actions = [];
+  if (recovery) {
+    const canRecover = recovery.kind !== 'inspect' && (recovery.kind !== 'provider' || selected || ready);
+    if (canRecover) {
+      const label = { continue: 'Continue with applied changes (read-only)', retry: 'Try again', reconnect: 'Reconnect', provider: 'Resume' }[recovery.kind];
+      actions.push(button(submittedRecovery === recovery.id ? 'Starting…' : label, 'primary', () => {
+        if (submittedRecovery === recovery.id) return;
+        submittedRecovery = recovery.id;
+        send('recoverRun', { id: recovery.id });
+        renderRecovery();
+      }, submittedRecovery === recovery.id));
+    } else if (recovery.kind === 'provider' && recovery.notBefore) {
+      const countdown = element('span', 'recovery-meta');
+      countdown.id = 'quota-countdown';
+      actions.push(countdown);
+    }
+    const configurationError = recovery.kind === 'provider' && [400, 401, 403, 404, 422].includes(recovery.status);
+    if (recovery.kind === 'provider' || recovery.kind === 'continue' || recovery.kind === 'retry') {
+      actions.push(button('Change model', !canRecover && !configurationError ? 'primary' : 'receipt-action', openProviders));
+    }
+    if (configurationError) {
+      actions.push(button('Open provider settings', canRecover ? 'receipt-action' : 'primary', () => send('providerSettings')));
+    }
+    if (recovery.sessionId) actions.push(button('Inspect session', recovery.kind === 'inspect' ? 'primary' : 'receipt-action', () => send('session')));
+  }
+  if (limit) {
+    actions.push(button('Adjust run limits', 'primary', () => {
+      $('compose-extras').open = true;
+      $('run-options').open = true;
+      const field = /tokens?/i.test(limit) ? 'tokens' : /cost/i.test(limit) ? 'cost' : 'seconds';
+      $(`limit-${field}`).focus();
+    }));
+  }
+  $('recovery-actions').replaceChildren(...actions);
+  updateQuotaCountdown();
+}
+function updateQuotaCountdown() {
+  const countdown = $('quota-countdown');
+  if (countdown && state.recovery?.notBefore) {
+    const seconds = Math.max(0, Math.ceil((state.recovery.notBefore - Date.now()) / 1000));
+    countdown.textContent = `Retry in ${formatDuration(seconds)}`;
+  }
+}
+
+let followUpSignature;
+const followUpEditor = $('follow-up-editor');
+const followUpPrompt = $('follow-up-prompt');
+followUpEditor.addEventListener('close', () => {
+  const { queueId, requeue } = followUpEditor.dataset;
+  const update = { id: queueId, requeue: requeue === 'true' };
+  if (followUpEditor.returnValue === 'save') update.prompt = followUpPrompt.value;
+  send('updateFollowUp', update);
+});
+function renderFollowUp(busy) {
+  const queue = state.queuedFollowUp;
+  const tray = $('follow-up');
+  const signature = JSON.stringify([queue, busy]);
+  if (signature === followUpSignature) return;
+  followUpSignature = signature;
+  tray.hidden = !queue;
+  if (!queue) { tray.replaceChildren(); return; }
+  const text = element('span', 'follow-up-text', queue.prompt);
+  text.title = queue.prompt;
+  const controls = element('div', 'follow-up-actions');
+  if (!busy) controls.append(button('Send now', 'receipt-action', () => send('sendFollowUp', { id: queue.id })));
+  controls.append(
+    button('Edit', 'receipt-action', () => send('editFollowUp', { id: queue.id })),
+    button('Remove', 'receipt-action', () => send('removeFollowUp', { id: queue.id })),
+  );
+  tray.replaceChildren(element('strong', '', queue.status === 'queued' ? 'Follow-up queued' : 'Follow-up held'), text, controls);
+}
+
 const feed = document.querySelector('main');
-const nearEnd = () => feed.scrollHeight - feed.scrollTop - feed.clientHeight < 140;
+const nearEnd = () => feed.scrollHeight - feed.scrollTop - feed.clientHeight < 64;
 const scrollToEnd = () => feed.scrollTo({ top: feed.scrollHeight });
 let followFeed = true;
+let unreadActivity = 0;
 let announcedStatus;
 function markJump() {
-  $('jump-latest').hidden = followFeed || nearEnd();
+  const jump = $('jump-latest');
+  jump.hidden = followFeed;
+  jump.textContent = unreadActivity ? `Jump to latest · ${unreadActivity > 99 ? '99+' : unreadActivity} new` : 'Jump to latest';
 }
-feed.addEventListener('scroll', () => { followFeed = nearEnd(); markJump(); }, { passive: true });
-$('jump-latest').addEventListener('click', () => { followFeed = true; scrollToEnd(); markJump(); });
-setInterval(() => { if (state.retry) $('status-text').textContent = statusLabel(); }, 300);
+feed.addEventListener('scroll', () => {
+  followFeed = nearEnd();
+  if (followFeed) unreadActivity = 0;
+  markJump();
+}, { passive: true });
+$('jump-latest').addEventListener('click', () => {
+  followFeed = true;
+  unreadActivity = 0;
+  scrollToEnd();
+  markJump();
+  feed.focus({ preventScroll: true });
+});
+function trackNewActivity(previous, next) {
+  if (previous.activeConversationId !== next.activeConversationId) {
+    followFeed = true;
+    unreadActivity = 0;
+    return;
+  }
+  if (followFeed) return;
+  const steps = Math.max(0, (next.activitySequence ?? 0) - (previous.activitySequence ?? 0));
+  const oldLast = previous.messages.at(-1);
+  const newLast = next.messages.at(-1);
+  const milestones = previous.status !== next.status || previous.error !== next.error ||
+    oldLast?.attempt?.id !== newLast?.attempt?.id || previous.approvals.length !== next.approvals.length ||
+    previous.evidence?.checks.length !== next.evidence?.checks.length;
+  unreadActivity += steps || Number(milestones);
+}
+setInterval(() => {
+  if (state.retry) $('status-text').textContent = statusLabel();
+  if (state.recovery?.notBefore) { renderRecovery(); updateQuotaCountdown(); }
+}, 300);
 
 function render() {
+  renderAppearance(state.appearance);
+  const oldFeedHeight = feed.scrollHeight;
   const busy = isRunning() || !!state.auxiliary;
   
   if (busy && !prevBusy) {
@@ -917,7 +1386,7 @@ function render() {
   });
 
   $('hero').hidden = state.messages.length > 0;
-  $('run-status').hidden = state.status === 'idle' && !state.auxiliary;
+  $('run-status').hidden = !state.auxiliary && (state.status === 'idle' || (state.status === 'failed' && !!state.error));
   $('run-status').classList.toggle('busy', busy);
   $('run-status').dataset.runState = state.retry ? 'retry' : state.status;
   if (isRunning() && !state.retry && !state.auxiliary) {
@@ -925,11 +1394,18 @@ function render() {
   } else {
     $('status-text').textContent = statusLabel();
   }
-  const announce = state.retry?.message || statusLabel();
-  if (announce !== announcedStatus && announce !== 'idle') $('announce').textContent = announce;
+  const pendingApprovals = state.approvals.filter(item => !state.commandReceipts?.some(receipt => receipt.id === item.toolCallId)).length;
+  const announce = state.retry?.message || state.recovery?.title ||
+    (state.status === 'awaiting-review' && pendingApprovals ? `${pendingApprovals} approval${pendingApprovals === 1 ? '' : 's'} waiting for review` : statusLabel());
+  if (announce !== announcedStatus && announce !== 'idle' && !state.error) $('announce').textContent = announce;
   announcedStatus = announce;
-  $('stop').hidden = !busy; $('send').disabled = busy; $('prompt').disabled = busy;
-  $('workflow').disabled = $('preview-context').disabled = $('isolated').disabled = busy;
+  const canQueue = busy && state.canQueue && !state.auxiliary && !state.queuedFollowUp;
+  $('stop').hidden = !busy;
+  $('stop').lastChild.textContent = state.retry ? ' Stop retrying' : ' Stop';
+  $('send').textContent = busy ? 'Queue' : 'Send';
+  $('send').disabled = (busy && !canQueue) || !!submittedFollowUp;
+  $('workflow').disabled = busy && !canQueue;
+  $('preview-context').disabled = $('isolated').disabled = busy;
   $('session').hidden = !state.sessionId;
   const connectBtn = $('connect');
   if (connectBtn) {
@@ -940,20 +1416,9 @@ function render() {
     sessionBtn.title = state.sessionId ? `Open TrueForge session (${state.sessionId.slice(-6)})` : 'Open TrueForge sessions dashboard';
   }
 
-  // Render recent activity trace
-  const recentSteps = state.activity.slice(-5);
-  $('activity').replaceChildren(...recentSteps.map(raw => {
-    const { iconSvg, label } = formatToolStep(raw);
-    const item = element('div', 'activity-item');
-    const iconSpan = element('span', 'step-icon');
-    if (iconSvg) iconSpan.innerHTML = iconSvg;
-    item.append(iconSpan, element('span', 'step-text', label));
-    return item;
-  }));
-
   // Render messages transcript
   const transcript = $('transcript');
-  const oldHeight = transcript.scrollHeight;
+  const liveResults = $('live-results');
 
   const visibleMessages = state.messages.filter((m, idx, arr) => {
     if (m.text && m.text.trim()) {
@@ -962,7 +1427,7 @@ function render() {
       }
       return true;
     }
-    if (m.role === 'assistant' && busy && idx === arr.length - 1) return true;
+    if (m.role === 'assistant' && (m.attempt?.receipt || m.attempt?.error || m.attempt?.label || m.attempt?.activity?.length || (busy && idx === arr.length - 1))) return true;
     return false;
   });
 
@@ -981,7 +1446,10 @@ function render() {
   const newNodes = [];
   visibleMessages.forEach((message, idx) => {
     const isLast = idx === visibleMessages.length - 1;
-    const existing = existingRows[idx];
+    const indexedRow = existingRows[idx];
+    const existing = message.attempt ? existingRows.find(row => row.dataset.attemptId === message.attempt.id)
+      : indexedRow?.dataset.attemptId ? undefined : indexedRow;
+    const messageSteps = isLast && state.activity.length ? steps : (message.attempt?.activity ?? []).map(parseAntigravityStep).filter(Boolean);
 
     let row;
     // Reuse existing DOM element for completed messages if role and text are identical
@@ -989,19 +1457,24 @@ function render() {
       row = existing;
     } else if (isLast && existing && existing.dataset.role === 'assistant' && message.role === 'assistant') {
       // Reuse and update active assistant row in-place!
-      updateActiveAssistantRow(existing, message, busy, state, steps);
+      updateActiveAssistantRow(existing, message, busy, state, messageSteps);
       existing.dataset.text = message.text || '';
       row = existing;
     } else {
-      row = buildMessageRow(message, idx, isLast, busy, state, steps);
+      row = buildMessageRow(message, idx, isLast, busy, state, messageSteps);
       row.dataset.role = message.role;
       row.dataset.text = message.text || '';
+      if (message.attempt) row.dataset.attemptId = message.attempt.id;
     }
 
+    renderAttemptEnd(row, message.attempt, isLast && !!state.error, busy);
+    row.dataset.messageIndex = String(state.messages.indexOf(message));
+    const branch = row.querySelector('.branch-action');
+    if (branch) branch.disabled = busy || !state.activeConversationId;
     newNodes.push(row);
 
     // Place the "Working through your repository…" component after the active input
-    if (idx === activeUserIdx && busy) {
+    if (busy && (message.attempt?.label ? isLast : idx === activeUserIdx && !visibleMessages.at(-1)?.attempt?.label)) {
       newNodes.push($('run-status'));
     }
   });
@@ -1013,19 +1486,19 @@ function render() {
     }
   }
 
-  const currentNodes = Array.from(transcript.children).filter(node => !node.classList.contains('impact-radar-card'));
   transcript.querySelectorAll(':scope > .impact-radar-card').forEach(node => node.remove());
-  if (newNodes.length !== currentNodes.length || newNodes.some((node, index) => node !== currentNodes[index])) {
-    transcript.replaceChildren(...newNodes);
-  }
+  const nextNodes = new Set(newNodes);
+  for (const node of Array.from(transcript.children)) if (!nextNodes.has(node)) node.remove();
+  newNodes.forEach((node, index) => {
+    if (transcript.children[index] !== node) transcript.insertBefore(node, transcript.children[index] ?? null);
+  });
+  const liveOwner = state.evidence?.id
+    ? newNodes.find(node => node.dataset.attemptId === state.evidence.id) : undefined;
+  const liveSlot = liveOwner ?? $('live-results-slot');
+  if (liveResults.parentElement !== liveSlot) liveSlot.append(liveResults);
 
-  if (transcript.scrollHeight > oldHeight && state.status === 'running' && followFeed) requestAnimationFrame(scrollToEnd);
-  requestAnimationFrame(markJump);
-
-  $('error').hidden = !state.error;
-  $('error-text').textContent = state.error || '';
-  if (state.error && state.error !== renderedError) requestAnimationFrame(() => $('error').scrollIntoView({ block: 'nearest', behavior: 'auto' }));
-  renderedError = state.error || null;
+  renderRecovery();
+  renderFollowUp(busy);
 
   $('contexts').hidden = !state.context;
   if (state.context) {
@@ -1033,6 +1506,12 @@ function render() {
     const costs = new Map();
     for (const chunk of c.chunks) costs.set(chunk.path, (costs.get(chunk.path) ?? 0) + (chunk.tokens ?? 0));
     $('budget-label').textContent = `${c.usedTokens.toLocaleString()} / ${c.budgetTokens.toLocaleString()} tokens`;
+    const meter = $('meter-bar').parentElement;
+    meter.setAttribute('role', 'progressbar');
+    meter.setAttribute('aria-label', 'Estimated context budget');
+    meter.setAttribute('aria-valuemin', '0');
+    meter.setAttribute('aria-valuemax', String(c.budgetTokens || 1));
+    meter.setAttribute('aria-valuenow', String(c.usedTokens));
     $('budget-index').textContent = c.selectionOnly ? '1 file' : `${c.indexedFiles} files`;
     $('meter-bar').style.width = `${Math.min(100, c.usedTokens / Math.max(1, c.budgetTokens) * 100)}%`;
     $('source-list').replaceChildren(...c.chunks.map(chunk => {
@@ -1050,114 +1529,15 @@ function render() {
   renderEvidence();
   renderContextEditor();
 
-  // Render command checks with modern agent CLI card styling
-  const activeApprovals = state.approvals.filter(a => a.name === 'run_command' && !dismissedApprovals.has(a.toolCallId));
-  $('command-list').replaceChildren(...activeApprovals.map(a => {
-    const card = element('div', 'command-card');
-    const decision = approvalDecisions.get(a.toolCallId);
-    const dismiss = () => {
-      if (!approvalDecisions.has(a.toolCallId)) {
-        approvalDecisions.set(a.toolCallId, 'denied');
-        send('commandDecision', { toolCallId: a.toolCallId, allow: false });
-      }
-      dismissedApprovals.add(a.toolCallId);
-      card.remove();
-    };
+  renderCommands();
 
-    // Header
-    const header = element('div', 'command-card-header');
-    const headerLeft = element('div', 'command-header-left');
-    const termIcon = element('span', 'command-header-icon');
-    termIcon.innerHTML = SVG_ICONS.terminal;
-
-    const tagStatus = decision ? decision : 'required';
-    const tagText = decision === 'allowed' ? 'Allowed' : decision === 'denied' ? 'Denied' : 'Approval required';
-    const badgeTag = element('span', `command-badge-tag ${tagStatus}`, tagText);
-
-    headerLeft.append(termIcon, element('span', 'command-card-title', 'Terminal Command Request'), badgeTag);
-
-    // Cross / dismiss button
-    const crossBtn = button('', 'card-dismiss-btn', dismiss);
-    crossBtn.title = decision ? 'Dismiss request' : 'Deny and dismiss request';
-    crossBtn.innerHTML = SVG_ICONS.close;
-    header.append(headerLeft, crossBtn);
-    card.append(header);
-
-    // Command CLI code box
-    const cmdStr = formatCommandString(a.args);
-    const cliBox = element('div', 'command-cli-box');
-    const cliLine = element('div', 'command-cli-line');
-    const promptSym = element('span', 'command-prompt-symbol', '$');
-    const codeEl = element('code', 'command-cli-code', cmdStr);
-    cliLine.append(promptSym, codeEl);
-
-    const copyBtn = element('button', 'command-copy-btn');
-    copyBtn.type = 'button';
-    copyBtn.title = 'Copy command';
-    copyBtn.innerHTML = `${SVG_ICONS.copy}<span>Copy</span>`;
-    copyBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      navigator.clipboard.writeText(cmdStr).then(() => {
-        copyBtn.innerHTML = `${SVG_ICONS.check}<span>Copied!</span>`;
-        setTimeout(() => {
-          copyBtn.innerHTML = `${SVG_ICONS.copy}<span>Copy</span>`;
-        }, 1500);
-      }).catch(() => {});
-    });
-
-    cliBox.append(cliLine, copyBtn);
-    card.append(cliBox);
-
-    // Security note
-    const secRow = element('div', 'command-security-row');
-    const shieldIcon = element('span', 'command-security-icon');
-    shieldIcon.innerHTML = SVG_ICONS.shield;
-    secRow.append(shieldIcon, element('span', '', 'Runs locally in workspace with your user permissions'));
-    card.append(secRow);
-
-    // Actions
-    const actions = element('div', 'command-actions');
-    function showResolvedActions(status) {
-      crossBtn.title = 'Dismiss request';
-      actions.replaceChildren();
-      const statusRow = element('div', 'command-status-row');
-      const statusMsg = element('div', `command-status-msg ${status}`);
-      statusMsg.innerHTML = status === 'allowed'
-        ? `<span class="icon-inline">${SVG_ICONS.check}</span> Command allowed`
-        : `<span class="icon-inline">${SVG_ICONS.close}</span> Command denied`;
-
-      const dismissAction = button('Dismiss', 'review-dismiss-action', dismiss);
-      dismissAction.title = 'Dismiss';
-      statusRow.append(statusMsg, dismissAction);
-      actions.append(statusRow);
-    }
-
-    if (!decision) {
-      const denyBtn = button('Deny', 'command-action-btn command-deny-btn', () => {
-        approvalDecisions.set(a.toolCallId, 'denied');
-        send('commandDecision', { toolCallId: a.toolCallId, allow: false });
-        badgeTag.className = 'command-badge-tag denied';
-        badgeTag.textContent = 'Denied';
-        showResolvedActions('denied');
-      });
-      const allowBtn = button('Allow once', 'command-action-btn command-allow-btn', () => {
-        approvalDecisions.set(a.toolCallId, 'allowed');
-        send('commandDecision', { toolCallId: a.toolCallId, allow: true });
-        badgeTag.className = 'command-badge-tag allowed';
-        badgeTag.textContent = 'Allowed';
-        showResolvedActions('allowed');
-      });
-      actions.append(denyBtn, allowBtn);
-    } else {
-      showResolvedActions(decision);
-    }
-
-    card.append(actions);
-    return card;
-  }));
-
-  $('checkpoints').hidden = !state.checkpoints.length;
-  $('checkpoint-list').replaceChildren(...state.checkpoints.slice(-4).reverse().map(cp => {
+  const attachedUndo = new Set([
+    ...(state.evidence?.edits.map(edit => edit.checkpointId) ?? []),
+    ...state.messages.flatMap(message => message.attempt?.receipt?.reviews.map(review => review.checkpointId) ?? []),
+  ]);
+  const checkpoints = state.checkpoints.filter(cp => !attachedUndo.has(cp.id));
+  $('checkpoints').hidden = !checkpoints.length;
+  $('checkpoint-list').replaceChildren(...checkpoints.slice(-4).reverse().map(cp => {
     const row = element('div', 'checkpoint');
     row.append(element('span', '', `${cp.paths.length} files · ${cp.state}`), button('Undo change', 'small-button', () => send('undo', { id: cp.id }), busy));
     return row;
@@ -1171,21 +1551,63 @@ function render() {
   renderContract(state);
   renderRepro(state);
   renderImpactRadarCards(transcript, state);
+  filterTimeline();
+  if (followFeed && (feed.scrollHeight !== oldFeedHeight || !nearEnd())) {
+    requestAnimationFrame(() => { if (followFeed) scrollToEnd(); });
+  }
+  markJump();
 }
+
+function filterTimeline() {
+  const filter = $('timeline-filter');
+  filter.hidden = !state.messages.length;
+  const value = filter.value;
+  for (const node of feed.querySelectorAll('[data-timeline-kind]')) {
+    node.classList.toggle('timeline-filtered', value !== 'all' && !node.dataset.actionRequired && !node.dataset.timelineKind.split(' ').includes(value));
+  }
+  for (const trace of feed.querySelectorAll('.work-trace')) {
+    const matching = value !== 'all' && !!trace.querySelector('[data-timeline-kind]:not(.timeline-filtered)');
+    trace.classList.toggle('timeline-filtered', value !== 'all' && !matching);
+    if (matching && !trace.open) {
+      trace.dataset.filterOpened = 'true';
+      trace.open = true;
+      const steps = trace.querySelector('.work-subgroup');
+      if (steps) steps.open = true;
+    } else if (value === 'all' && trace.dataset.filterOpened) {
+      trace.open = false;
+      delete trace.dataset.filterOpened;
+    }
+  }
+}
+$('timeline-filter').addEventListener('change', filterTimeline);
+$('copy-diagnostic').addEventListener('click', () => send('copyDiagnostic'));
+$('prompt').setAttribute('aria-keyshortcuts', 'Alt+C');
+$('jump-latest').setAttribute('aria-keyshortcuts', 'Alt+J');
+$('jump-latest').title = 'Jump to latest (Alt+J)';
+$('recovery-actions').setAttribute('aria-keyshortcuts', 'Alt+E');
 
 let historySearchQuery = '';
 let historyFilter = 'all';
+let historyMatches;
+let historySignature;
 
 function renderHistoryItems() {
   const historyItems = $('history-items');
   if (!historyItems) return;
   const conversations = Array.isArray(state.conversations) ? state.conversations : [];
+  const result = historyMatches?.query === historySearchQuery ? historyMatches : undefined;
+  const signature = JSON.stringify([conversations, state.activeConversationId, historyFilter, historySearchQuery, result]);
+  if (signature === historySignature) return;
+  historySignature = signature;
+  const focusedChat = historyItems.contains(document.activeElement) ? document.activeElement.dataset.conversationId : undefined;
 
   const now = Date.now();
+  const matches = new Map((result?.matches ?? []).map(match => [match.id, match]));
   const filtered = conversations.filter(c => {
+    if (historyFilter === 'archived' ? !c.archived : c.archived) return false;
     if (historySearchQuery) {
       const match = (c.title || '').toLowerCase().includes(historySearchQuery);
-      if (!match) return false;
+      if (!match && !matches.has(c.id)) return false;
     }
     if (historyFilter === 'today') {
       return (now - (c.updatedAt || 0)) <= 86400000;
@@ -1194,10 +1616,12 @@ function renderHistoryItems() {
       return (now - (c.updatedAt || 0)) <= 3 * 86400000;
     }
     return true;
-  });
+  }).sort((a, b) => Number(!!b.pinned) - Number(!!a.pinned) || (b.updatedAt ?? 0) - (a.updatedAt ?? 0));
 
   if (filtered.length === 0) {
-    const empty = element('div', 'history-empty', historySearchQuery ? 'No matching conversations.' : 'No past conversations yet.');
+    const empty = element('div', 'history-empty', historySearchQuery
+      ? (historyMatches?.query === historySearchQuery ? 'No matching conversations.' : 'Searching conversations…')
+      : 'No past conversations yet.');
     historyItems.replaceChildren(empty);
     return;
   }
@@ -1205,6 +1629,7 @@ function renderHistoryItems() {
   historyItems.replaceChildren(...filtered.map(conv => {
     const item = element('div', `history-item${conv.id === state.activeConversationId ? ' active' : ''}`);
     item.tabIndex = 0;
+    item.dataset.conversationId = conv.id;
 
     const icon = element('span', 'history-item-icon');
     icon.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>';
@@ -1213,6 +1638,11 @@ function renderHistoryItems() {
     const title = element('div', 'history-item-title', conv.title || 'Conversation');
     const meta = element('div', 'history-item-meta', `${formatRelativeTime(conv.updatedAt)} · ${conv.messageCount} msg${conv.messageCount === 1 ? '' : 's'}`);
     info.append(title, meta);
+    const status = { 'awaiting-review': 'Review needed', failed: 'Interrupted', cancelled: 'Stopped', running: 'Running' }[conv.status];
+    const flags = [conv.pinned && 'Pinned', status].filter(Boolean);
+    if (flags.length) info.append(element('div', 'history-item-meta', flags.join(' · ')));
+    const match = matches.get(conv.id);
+    if (match?.excerpt) info.append(element('div', 'history-match', match.excerpt));
 
     const actions = element('div', 'history-item-actions');
     if (conv.id === state.activeConversationId) {
@@ -1227,12 +1657,30 @@ function renderHistoryItems() {
       e.stopPropagation();
       send('deleteConversation', { id: conv.id });
     });
-    actions.append(delBtn);
+    const menu = element('details', 'chat-item-menu');
+    menu.addEventListener('click', event => event.stopPropagation());
+    const trigger = element('summary', '', '···');
+    trigger.setAttribute('aria-label', `Manage ${conv.title || 'conversation'}`);
+    const choices = element('div', 'chat-item-options');
+    for (const [type, label] of [
+      ['renameConversation', 'Rename'],
+      ['pinConversation', conv.pinned ? 'Unpin' : 'Pin'],
+      ['archiveConversation', conv.archived ? 'Unarchive' : 'Archive'],
+    ]) {
+      choices.append(button(label, 'receipt-action', () => {
+        menu.open = false;
+        send(type, { id: conv.id });
+      }));
+    }
+    delBtn.setAttribute('aria-label', 'Delete conversation');
+    choices.append(delBtn);
+    menu.append(trigger, choices);
+    actions.append(menu);
 
     item.append(icon, info, actions);
     const openConversation = () => {
       closeAllDrawers();
-      send('switchConversation', { id: conv.id });
+      send('switchConversation', match?.messageIndex === undefined ? { id: conv.id } : { id: conv.id, messageIndex: match.messageIndex });
     };
     item.addEventListener('click', openConversation);
     item.addEventListener('keydown', event => {
@@ -1243,6 +1691,7 @@ function renderHistoryItems() {
     });
     return item;
   }));
+  if (focusedChat) [...historyItems.children].find(item => item.dataset.conversationId === focusedChat)?.focus({ preventScroll: true });
 }
 
 function updateToolsNotificationBadge() {
@@ -1474,7 +1923,7 @@ function renderImpactRadarCards(transcript, state) {
   if (results.length === 0) return;
   // If proposals are displayed in review-list, impact is embedded inside the proposal cards.
   // Only display in transcript if there are no visible proposals.
-  const activeProposals = state.proposals.filter(p => !dismissedProposals.has(p.id));
+  const activeProposals = state.proposals.filter(p => p.state === 'pending');
   if (activeProposals.length === 0) {
     for (const res of results) {
       transcript.append(createImpactRadarCard(res, true));
@@ -1486,7 +1935,43 @@ const promptInput = $('prompt');
 const workflow = $('workflow');
 promptInput.value = typeof saved.prompt === 'string' ? saved.prompt : '';
 workflow.value = ['build', 'ask', 'plan'].includes(saved.workflow) ? saved.workflow : 'build';
-function storeDraft() { vscode.setState?.({ demo: demoMode, prompt: promptInput.value, workflow: workflow.value }); }
+const draftsByChat = new Map(Object.entries(saved.drafts ?? {}));
+let draftChatId;
+let firstDraft = true;
+const limitKeys = ['seconds', 'tokens', 'cost', 'rate'];
+function storeDraft() {
+  if (draftChatId) {
+    const value = {
+      prompt: promptInput.value, workflow: workflow.value,
+      context: { pins: [...draft.pins], excluded: [...draft.excluded], semantic: draft.semantic },
+      limits: Object.fromEntries(limitKeys.map(key => [key, $(`limit-${key}`).value])),
+    };
+    draftsByChat.delete(draftChatId);
+    draftsByChat.set(draftChatId, value);
+    if (draftsByChat.size > 36) draftsByChat.delete(draftsByChat.keys().next().value);
+  }
+  vscode.setState?.({ demo: demoMode, drafts: Object.fromEntries(draftsByChat), ...(firstDraft ? { prompt: promptInput.value, workflow: workflow.value } : {}) });
+}
+function restoreChatDraft(id) {
+  if (!id || id === draftChatId) return;
+  const previous = draftChatId;
+  if (previous) storeDraft();
+  const value = draftsByChat.get(id) ?? (firstDraft ? saved : {});
+  draftChatId = id;
+  firstDraft = false;
+  promptInput.value = typeof value.prompt === 'string' ? value.prompt : '';
+  workflow.value = ['build', 'ask', 'plan'].includes(value.workflow) ? value.workflow : 'build';
+  draft.pins = Array.isArray(value.context?.pins) ? value.context.pins : [];
+  draft.excluded = Array.isArray(value.context?.excluded) ? value.context.excluded : [];
+  draft.semantic = value.context?.semantic === true;
+  replacement = undefined;
+  $('symbol-graph').checked = draft.semantic;
+  for (const key of limitKeys) $(`limit-${key}`).value = value.limits?.[key] ?? '';
+  setContextOpen(false);
+  $('compose-extras').open = false;
+  refreshComposer();
+  syncWorkflow();
+}
 function adjustPromptHeight() {
   promptInput.style.height = 'auto';
   promptInput.style.height = `${Math.min(200, Math.max(52, promptInput.scrollHeight))}px`;
@@ -1496,23 +1981,35 @@ function renderMentions() {
   const mentions = [...promptInput.value.matchAll(/@(?:file|folder|symbol)(?:\([^\r\n)]+\)|:(?:"[^"\r\n]+"|[^\s,;]+))|@[\w.\-]+(?:\/[\w.\-]+)+/g)];
   tray.hidden = !mentions.length;
   tray.replaceChildren(...mentions.map(match => {
-    const chip = button(`${match[0]} ×`, 'small-button', () => {
+    const group = element('span', 'attachment-chip');
+    const open = button(match[0], 'receipt-action', () => send('previewMention', { reference: match[0] }));
+    open.setAttribute('aria-label', `Preview ${match[0]}`);
+    const chip = button('×', 'small-button', () => {
       promptInput.setRangeText('', match.index, match.index + match[0].length, 'start');
       refreshComposer();
       promptInput.focus();
     });
     chip.type = 'button';
     chip.setAttribute('aria-label', `Remove ${match[0]}`);
-    return chip;
+    group.append(open, chip);
+    return group;
   }));
 }
 function refreshComposer() { adjustPromptHeight(); renderMentions(); storeDraft(); }
 function syncWorkflow() {
-  $('send').textContent = ({ ask: 'Ask ↗', plan: 'Plan ↗', build: 'Build ↗' })[workflow.value];
+  $('send').title = `Send in ${workflow.selectedOptions[0].textContent} mode (Ctrl+Enter)`;
+  const help = {
+    ask: 'Ask reads the workspace and answers questions.',
+    plan: 'Plan reads the workspace and drafts implementation steps.',
+    build: 'Build can stage edits and request approval for changes and checks.',
+  };
+  $('workflow-help').textContent = help[workflow.value];
+  workflow.title = help[workflow.value];
   storeDraft();
 }
 workflow.addEventListener('change', syncWorkflow);
 function refreshDraft() {
+  storeDraft();
   renderContextEditor();
   if (!state.auxiliary && !isRunning()) send('contextPreview', { prompt: promptInput.value.trim(), context: draft });
 }
@@ -1526,15 +2023,22 @@ function setPin(file) {
   draft.pins = [...new Set([...draft.pins, file])].slice(0, 20);
   refreshDraft();
 }
+function setContextOpen(open) {
+  $('context-editor').hidden = !open;
+  $('preview-context').setAttribute('aria-expanded', String(open));
+}
 $('preview-context').addEventListener('click', () => {
-  $('context-editor').hidden = !$('context-editor').hidden;
-  if (!$('context-editor').hidden) refreshDraft();
+  const open = $('context-editor').hidden;
+  $('compose-extras').open = false;
+  setContextOpen(open);
+  if (open) refreshDraft();
 });
 $('context-refresh').addEventListener('click', refreshDraft);
 $('context-add').addEventListener('click', () => { replacement = undefined; send('contextPick'); });
 $('symbol-graph').addEventListener('change', event => { draft.semantic = event.target.checked; refreshDraft(); });
 
 promptInput.addEventListener('input', () => {
+  $('compose-extras').open = false;
   refreshComposer();
 
   const val = promptInput.value;
@@ -1563,9 +2067,12 @@ promptInput.addEventListener('input', () => {
 $('form').addEventListener('submit', event => {
   event.preventDefault();
   const prompt = $('prompt').value.trim();
-  if (prompt && !isRunning() && !state.auxiliary) {
-    const limits = Object.fromEntries(['seconds', 'tokens', 'cost', 'rate'].map(key => [key, Number($(`limit-${key}`).value || 0)]));
+  const running = isRunning();
+  const canQueue = running && state.canQueue && !state.queuedFollowUp && state.evidence?.id;
+  if (prompt && (!running || canQueue) && !state.auxiliary && !submittedFollowUp) {
+    const limits = Object.fromEntries(limitKeys.map(key => [key, Number($(`limit-${key}`).value || 0)]));
     if (limits.cost && !limits.rate) {
+      $('compose-extras').open = true;
       $('run-options').open = true;
       $('limit-rate').setCustomValidity('Enter an estimated price per million tokens.');
       $('limit-rate').reportValidity();
@@ -1573,17 +2080,32 @@ $('form').addEventListener('submit', event => {
     }
     hideSlashMenu();
     hideMentionMenu();
+    if (canQueue) {
+      submittedFollowUp = { prompt, after: canQueue };
+      $('send').disabled = true;
+      send('queueFollowUp', { after: canQueue, prompt, workflow: workflow.value, context: draft, limits });
+      return;
+    }
     turnStartTime = Date.now();
     lastCompletedDuration = null;
     followFeed = true;
+    unreadActivity = 0;
     send('run', { prompt, workflow: workflow.value, context: draft, limits });
     $('prompt').value = '';
-    $('context-editor').hidden = true;
+    setContextOpen(false);
+    $('compose-extras').open = false;
     refreshComposer();
   }
 });
+$('form').addEventListener('invalid', event => {
+  if (event.target.closest('#run-options')) {
+    $('compose-extras').open = true;
+    $('run-options').open = true;
+  }
+}, true);
 $('limit-rate').addEventListener('input', () => $('limit-rate').setCustomValidity(''));
 $('limit-cost').addEventListener('input', () => $('limit-rate').setCustomValidity(''));
+for (const key of limitKeys) $(`limit-${key}`).addEventListener('input', storeDraft);
 
 $('prompt').addEventListener('keydown', e => {
   if (slashMenu && !slashMenu.hidden && filteredSlashCommands.length > 0) {
@@ -1669,6 +2191,32 @@ function providerLogo(id) {
   return image;
 }
 
+function renderModelShortcuts(groups, favorites, recent, busy) {
+  const container = $('model-shortcuts');
+  const models = new Map(groups.flatMap(group => group.models.map(model => [model.name, { ...model, provider: group.id }])));
+  const sections = [
+    ['Favorites', favorites.filter(name => models.has(name))],
+    ['Recent successes', recent.filter(name => models.has(name) && !favorites.includes(name))],
+  ];
+  container.replaceChildren();
+  container.hidden = !sections.some(([, names]) => names.length);
+  for (const [heading, names] of sections) {
+    if (!names.length) continue;
+    const section = element('div', 'model-shortcut-group');
+    section.append(element('strong', '', heading));
+    for (const name of names) {
+      const model = models.get(name);
+      const select = button('', 'model-shortcut', () => send('selectProviderModel', { model: name }), busy);
+      select.append(providerLogo(model.provider), element('span', '', model.label));
+      select.title = name;
+      select.dataset.providerFocus = `shortcut:${name}`;
+      select.setAttribute('aria-pressed', String(state.model === name));
+      section.append(select);
+    }
+    container.append(section);
+  }
+}
+
 function renderProviders() {
   const groups = state.providers ?? [];
   const selected = groups.find(group => group.models.some(model => model.name === state.model));
@@ -1680,12 +2228,16 @@ function renderProviders() {
   const search = $('provider-search');
   const group = groups.find(item => item.id === activeProvider) ?? selected ?? groups[0];
   const busy = isRunning() || !!state.auxiliary || !!state.providerBusy;
-  const signature = JSON.stringify([groups, group?.id, state.model, state.connected, state.providerError, busy, search.value]);
+  const favorites = state.favoriteModels ?? [];
+  const recent = state.recentModels ?? [];
+  const observations = state.providerObservations ?? {};
+  const signature = JSON.stringify([groups, group?.id, state.model, state.connected, state.providerError, busy, search.value, favorites, recent, observations]);
   if (signature === providerSignature) return;
   providerSignature = signature;
   const options = $('provider-options');
   const modelList = $('provider-models');
   const focused = document.activeElement.dataset.providerFocus;
+  renderModelShortcuts(groups, favorites, recent, busy || !state.connected);
   options.replaceChildren(...groups.map(item => {
     const choice = button('', 'provider-option', () => {
       activeProvider = item.id;
@@ -1702,20 +2254,37 @@ function renderProviders() {
   $('provider-refresh').disabled = !!state.providerBusy;
   if (!group) return;
   $('provider-name').textContent = group.label;
-  $('provider-note').textContent = group.note;
+  const recentObservation = group.models.map(model => observations[model.name]).filter(Boolean).sort((a, b) => b.at - a.at)[0];
+  $('provider-note').textContent = [group.note, recentObservation && `Last observed ${recentObservation.outcome.toLowerCase()} · ${new Date(recentObservation.at).toLocaleString()}`].filter(Boolean).join(' · ');
   $('provider-status').textContent = group.models.length ? 'Configured' : group.needsToken ? 'API token needed' : 'Setup needed';
   $('provider-status').dataset.configured = String(!!group.models.length);
   search.hidden = group.models.length < 4;
   const query = search.hidden ? '' : search.value.trim().toLowerCase();
   const models = group.models.filter(model => model.label.toLowerCase().includes(query));
   modelList.replaceChildren(...models.map(model => {
+    const row = element('div', 'provider-model-row');
     const current = state.model === model.name;
     const choice = button(model.label, 'provider-model', () => send('selectProviderModel', { model: model.name }), busy || !state.connected);
     choice.title = model.name;
     choice.dataset.providerFocus = model.name;
     choice.setAttribute('aria-pressed', String(current));
     if (current) choice.append(element('span', 'provider-current', 'Selected'));
-    return choice;
+    const observation = observations[model.name];
+    const meta = [
+      model.contextLength && `${model.contextLength.toLocaleString()} context`,
+      model.maxOutputTokens && `${model.maxOutputTokens.toLocaleString()} max output`,
+      observation?.retryAt && observation.retryAt > Date.now() ? `Retry after ${new Date(observation.retryAt).toLocaleTimeString()}` : '',
+    ].filter(Boolean);
+    if (meta.length) choice.append(element('small', 'model-capabilities', meta.join(' · ')));
+    const pinned = favorites.includes(model.name);
+    const pin = button('', 'model-pin', () => send('toggleFavoriteModel', { model: model.name }));
+    pin.innerHTML = '<svg width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M6 3.5h8l-1.4 5 2.3 3H5.1l2.3-3L6 3.5ZM10 11.5v5"/></svg>';
+    pin.title = `${pinned ? 'Unpin' : 'Pin'} ${model.label}`;
+    pin.setAttribute('aria-label', `Favorite ${model.label}`);
+    pin.setAttribute('aria-pressed', String(pinned));
+    pin.dataset.providerFocus = `pin:${model.name}`;
+    row.append(choice, pin);
+    return row;
   }));
   if (group.models.length && !models.length) modelList.append(element('p', '', 'No matching models.'));
   if (!group.models.length && group.presets?.length) {
@@ -1729,7 +2298,7 @@ function renderProviders() {
   configure.textContent = manage ? 'Manage in TrueForge ↗' : group.needsToken ? 'Add API token' : 'Connect provider';
   configure.disabled = busy || !state.connected;
   configure.onclick = () => send(manage ? 'providerSettings' : 'configureProvider', manage ? {} : { provider: group.id });
-  if (focused) [...options.children, ...modelList.children].find(node => node.dataset.providerFocus === focused)?.focus({ preventScroll: true });
+  if (focused) [...providerDrawer.querySelectorAll('[data-provider-focus]')].find(node => node.dataset.providerFocus === focused)?.focus({ preventScroll: true });
 }
 
 function openProviders() {
@@ -2037,7 +2606,7 @@ if (historyBtn) {
         search.value = '';
         historySearchQuery = '';
         renderHistoryItems();
-        setTimeout(() => search.focus(), 50);
+        search.focus({ preventScroll: true });
       }
     }
   });
@@ -2049,7 +2618,9 @@ if (drawerNewChat) drawerNewChat.addEventListener('click', () => { closeAllDrawe
 const historySearch = $('history-search');
 if (historySearch) {
   historySearch.addEventListener('input', e => {
-    historySearchQuery = (e.target.value || '').trim().toLowerCase();
+    historySearchQuery = (e.target.value || '').trim().toLowerCase().slice(0, 160);
+    if (historySearchQuery) send('searchHistory', { query: historySearchQuery });
+    else historyMatches = undefined;
     renderHistoryItems();
   });
 }
@@ -2165,6 +2736,12 @@ document.addEventListener('click', e => {
 
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
+    const options = $('compose-extras');
+    if (options.open && options.contains(document.activeElement)) {
+      options.open = false;
+      options.querySelector('summary').focus();
+      e.preventDefault();
+    }
     const providersOpen = !providerDrawer.hidden;
     closeAllDrawers();
     hideSlashMenu();
@@ -2176,13 +2753,33 @@ document.addEventListener('keydown', e => {
 $('stop').addEventListener('click', () => send('stop'));
 $('sticky-stop').addEventListener('click', () => send('stop'));
 $('next-hunk').addEventListener('click', nextHunk);
-$('sticky-apply').addEventListener('click', () => { const active = activeReview(); if (active) send('apply', { proposalId: active.id }); });
+$('prev-hunk').addEventListener('click', () => nextHunk(-1));
+$('review-commands').addEventListener('click', () => {
+  const command = $('command-list').querySelector('.command-card');
+  command?.scrollIntoView({ block: 'center' });
+  command?.querySelector('.command-actions button:not(:disabled)')?.focus({ preventScroll: true });
+});
+$('open-review-diff').addEventListener('click', () => {
+  const proposal = activeReview();
+  const file = proposal?.files.find(item => item.hunks.some(hunk => hunk.decision === 'pending')) ?? proposal?.files[0];
+  if (file) send('preview', { proposalId: proposal.id, path: file.path });
+});
+$('sticky-apply').addEventListener('click', () => { const active = activeReview(); if (active) applyReview(active.id); });
 document.addEventListener('keydown', event => {
   const active = activeReview();
-  if (!event.altKey || event.ctrlKey || event.metaKey || !active || state.auxiliary || event.target.closest?.('textarea,input,select')) return;
+  if (!event.altKey || event.ctrlKey || event.metaKey || event.target.closest?.('textarea,input,select')) return;
   const key = event.key.toLowerCase();
+  if (key === 'c' || key === 'e' || key === 'j') {
+    if (key === 'c') $('prompt').focus();
+    if (key === 'e') $('recovery-actions').querySelector('button:not(:disabled)')?.focus();
+    if (key === 'j') $('jump-latest').click();
+    event.preventDefault();
+    return;
+  }
+  if (!active || state.auxiliary) return;
   if (key === 'enter' && !$('sticky-apply').disabled) $('sticky-apply').click();
   else if (key === 'n') nextHunk();
+  else if (key === 'p') nextHunk(-1);
   else if (key === 'a' || key === 'r') {
     const pending = document.activeElement.closest?.('.hunk') ?? document.querySelector('.hunk[data-decision="pending"]');
     if (pending?.dataset.proposalId === active.id) send('decide', { proposalId: active.id, hunkId: pending.dataset.hunkId, decision: key === 'a' ? 'accept' : 'reject' });
@@ -2210,17 +2807,24 @@ function applyDemoMode() {
   storeDraft();
 }
 $('demo-mode').addEventListener('click', () => { demoMode = !demoMode; applyDemoMode(); closeAllDrawers(); });
-$('file-mention').addEventListener('click', () => send('mention', { kind: 'file' }));
-const folderMention = $('folder-mention');
-if (folderMention) folderMention.addEventListener('click', () => send('mention', { kind: 'folder' }));
-$('symbol-mention').addEventListener('click', () => send('mention', { kind: 'symbol' }));
+for (const kind of ['file', 'folder', 'symbol']) {
+  $(`${kind}-mention`).addEventListener('click', () => {
+    $('compose-extras').open = false;
+    send('mention', { kind });
+  });
+}
 $('new-chat').addEventListener('click', () => {
   if (!isRunning() && !state.auxiliary) {
+    storeDraft();
+    draftChatId = undefined;
+    firstDraft = false;
     draft.pins = []; draft.excluded = []; draft.semantic = false;
     replacement = undefined;
     $('symbol-graph').checked = false;
-    $('context-editor').hidden = true;
+    setContextOpen(false);
+    $('compose-extras').open = false;
     promptInput.value = '';
+    for (const key of limitKeys) $(`limit-${key}`).value = '';
     refreshComposer();
   }
   send('newChat');
@@ -2235,8 +2839,42 @@ for (const card of document.querySelectorAll('[data-prompt]')) {
 
 window.addEventListener('message', event => {
   if (event.data.type === 'state') {
+    if (submittedRecovery && event.data.state.error !== state.error) submittedRecovery = undefined;
+    if (submittedProposal && event.data.state.error !== state.error && event.data.state.error) submittedProposal = undefined;
+    trackNewActivity(state, event.data.state);
     state = event.data.state;
+    restoreChatDraft(state.activeConversationId);
+    if (submittedFollowUp && (state.queuedFollowUp || !state.canQueue || state.evidence?.id !== submittedFollowUp.after)) {
+      if (state.queuedFollowUp?.prompt === submittedFollowUp.prompt && promptInput.value.trim() === submittedFollowUp.prompt) {
+        promptInput.value = '';
+        refreshComposer();
+      }
+      submittedFollowUp = undefined;
+    }
     render();
+  } else if (event.data.type === 'historyMatches' && event.data.query === historySearchQuery) {
+    historyMatches = event.data;
+    renderHistoryItems();
+  } else if (event.data.type === 'diagnosticCopied') {
+    $('copy-diagnostic').textContent = 'Copied';
+    setTimeout(() => { $('copy-diagnostic').textContent = 'Copy diagnostic'; }, 1600);
+  } else if (event.data.type === 'revealHistory' && event.data.id === state.activeConversationId && Number.isInteger(event.data.index)) {
+    const row = $('transcript').querySelector(`[data-message-index="${event.data.index}"]`);
+    if (row) {
+      followFeed = false;
+      row.tabIndex = -1;
+      row.scrollIntoView({ block: 'center' });
+      row.focus({ preventScroll: true });
+      markJump();
+    }
+  } else if (event.data.type === 'editFollowUp' && !followUpEditor.open && event.data.id === state.queuedFollowUp?.id) {
+    const { id, prompt, requeue } = event.data;
+    followUpEditor.dataset.queueId = id;
+    followUpEditor.dataset.requeue = String(requeue);
+    followUpEditor.returnValue = '';
+    followUpPrompt.value = prompt;
+    followUpEditor.showModal();
+    followUpPrompt.focus();
   } else if (event.data.type === 'openProviders') {
     openProviders();
   } else if (event.data.type === 'insertMention') {

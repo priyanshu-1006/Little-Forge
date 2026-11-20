@@ -1,5 +1,6 @@
 {
   "name": "little-forge",
+  "private": true,
   "displayName": "Little Forge",
   "description": "A TrueForge-native coding agent with budgeted repository context and reviewed, undoable edits.",
   "version": "0.1.2",
@@ -199,6 +200,19 @@
     "configuration": {
       "title": "Little Forge",
       "properties": {
+        "littleForge.notifyWhenHidden": {
+          "type": "boolean",
+          "default": false,
+          "scope": "application",
+          "description": "Notify when a hidden Little Forge sidebar needs review or recovery."
+        },
+        "littleForge.appearance": {
+          "type": "string",
+          "enum": ["system", "graphite", "blueprint", "paper", "moss", "violet", "glacier", "ember", "plum"],
+          "default": "system",
+          "scope": "application",
+          "description": "Color theme for the Little Forge sidebar."
+        },
         "littleForge.baseUrl": {
           "type": "string",
           "default": "http://127.0.0.1:8790",

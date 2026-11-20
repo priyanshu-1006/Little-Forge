@@ -19,6 +19,12 @@ export interface ChangeGuardConfig {
   safeMode?: boolean;
 }
 export interface ActiveRun { id: string; signal: AbortSignal; scope?: SelectionScope; contextBudget: number; performedAction: boolean; readOnly?: boolean; excludedPaths?: string[] }
+
+function approvalDigest(args: Record<string, unknown>): string {
+  // The MCP schema may reorder top-level fields. Keep values and array order exact.
+  return hash(JSON.stringify(Object.fromEntries(Object.keys(args).sort().map(key => [key, args[key]]))));
+}
+
 export class EditorTools {
   active?: ActiveRun;
   private readonly reads = new Map<string, FileSnapshot>();
@@ -27,21 +33,25 @@ export class EditorTools {
   private readonly readHistory = new Map<string, number>();
   private readonly runner: CommandRunner;
   constructor(readonly workspace: Workspace, readonly context: ContextEngine, readonly proposals: ProposalManager,
-    private readonly hooks: { context: (value: ContextResult) => void; proposal: (id: string) => void; activity: (text: string) => void; assertWritable: (paths: string[]) => void; diagnostics: (paths?: string[]) => unknown; applied?: (proposal: Proposal, result: ApplyResult) => void; check?: (record: CheckRecord) => void },
+    private readonly hooks: { context: (value: ContextResult) => void; proposal: (id: string) => void; activity: (text: string) => void; assertWritable: (paths: string[]) => void; diagnostics: (paths?: string[]) => unknown; applied?: (proposal: Proposal, result: ApplyResult) => void; check?: (record: CheckRecord, toolCallId?: string) => void; commandStarted?: (toolCallId: string) => void },
     public changeGuard: ChangeGuardConfig = { maxFiles: 5, allowDeps: false, safeMode: true },
     public permissionMode: string = 'auto') {
     this.runner = new CommandRunner(workspace);
   }
   start(run: ActiveRun) { this.reads.clear(); this.grants.clear(); this.searchHistory.clear(); this.readHistory.clear(); this.active = run; }
+  describeCommand(input: CommandInput) { return this.runner.describe(input); }
   stop() { if (this.active) this.proposals.discardRun(this.active.id); this.grants.clear(); this.searchHistory.clear(); this.readHistory.clear(); this.active = undefined; }
   authorize(name: string, args: Record<string, unknown>, toolCallId: string) {
     const run = this.requireRun();
     if (run.readOnly) throw new Error('This workflow allows read-only tools.');
     if (name === 'apply_proposal') this.proposals.authorize(String(args.proposalId), run.id, toolCallId);
     else if (name !== 'run_command') throw new Error('Unknown sensitive tool.');
-    this.grants.set(this.key(name, args), { toolCallId, digest: hash(JSON.stringify(args)) });
+    const digest = approvalDigest(args);
+    this.grants.set(this.key(name, args, digest), { toolCallId, digest });
   }
-  private key(name: string, args: Record<string, unknown>) { return name === 'apply_proposal' ? `${name}:${args.proposalId}` : `${name}:${hash(JSON.stringify(args))}`; }
+  private key(name: string, args: Record<string, unknown>, digest: string) {
+    return name + ':' + (name === 'apply_proposal' ? args.proposalId : digest);
+  }
   private requireRun(): ActiveRun { const run = this.active; if (!run) throw new Error('No active editor run. Start a request from Little Forge.'); cancelled(run.signal); return run; }
   async call(name: string, args: Record<string, unknown>): Promise<unknown> {
     const run = this.requireRun();
@@ -62,9 +72,7 @@ export class EditorTools {
     if (run.readOnly && ['propose_changes', 'apply_proposal', 'run_command'].includes(name)) throw new Error('This workflow allows read-only tools.');
     let activityText = name.replaceAll('_', ' ');
     if (name === 'search_workspace' && args.query) activityText = `search workspace: "${args.query}"`;
-    else if (name === 'read_file' && args.path) activityText = `read file: ${args.path}`;
-    else if (name === 'run_command') activityText = `run command: ${(args.args as string[])?.join(' ') || args.task}`;
-    this.hooks.activity(activityText);
+    if (name !== 'run_command' && name !== 'read_file') this.hooks.activity(activityText);
     if (name === 'get_workspace_map') {
       const files = await this.workspace.list(run.signal);
       return { files: files.slice(0, 200).map(f => f.path), total: files.length, truncated: files.length > 200, guidance: 'Use retrieve_context, search_workspace and find_symbols to discover implementation, tests and documentation.' };
@@ -75,6 +83,7 @@ export class EditorTools {
       const count = (this.searchHistory.get(key) ?? 0) + 1;
       this.searchHistory.set(key, count);
       const matches = await this.workspace.search(query, args.glob as string | undefined, args.limit as number | undefined, run.signal);
+      for (const match of matches.slice(0, 3)) this.hooks.activity('Search match: ' + JSON.stringify([match.path, match.line]));
       let guidance: string | undefined;
       if (matches.length === 0) {
         guidance = 'No matches found. For a new feature, inspect existing related code from the retrieved context or search for a comparable feature before proposing changes.';
@@ -93,6 +102,7 @@ export class EditorTools {
       const content = lines.slice(start - 1, end).join('\n');
       if (Buffer.byteLength(content) > run.contextBudget) throw new Error('Read exceeds the active context budget; request fewer lines.');
       this.reads.set(file.path, file);
+      this.hooks.activity(`read file: ${file.path} · Line ${start}`);
       const readKey = `${filePath}:${start}-${end}`;
       const count = (this.readHistory.get(readKey) ?? 0) + 1;
       this.readHistory.set(readKey, count);
@@ -180,8 +190,9 @@ export class EditorTools {
         if (run.scope) throw new Error('Inline edits cannot execute project commands.');
         if (this.changeGuard.executeCommands === 'disallowed') throw new ForgeError('Change Guard: Executing terminal commands is disallowed by your task permissions.');
       }
-      const key = this.key(name, args), grant = this.grants.get(key);
-      if (!grant || grant.digest !== hash(JSON.stringify(args))) throw new Error('Missing or expired one-use editor approval.');
+      const digest = approvalDigest(args);
+      const key = this.key(name, args, digest), grant = this.grants.get(key);
+      if (!grant || grant.digest !== digest) throw new Error('Missing or expired one-use editor approval.');
       this.grants.delete(key);
       if (name === 'apply_proposal') {
         const proposal = this.proposals.get(String(args.proposalId));
@@ -196,7 +207,8 @@ export class EditorTools {
         return result;
       }
       run.performedAction = true; // A project check can have side effects; never retry its parent turn.
-      const { result, changedSource, detectionPartial } = await this.verify(args as unknown as CommandInput, 'agent', run.signal);
+      this.hooks.commandStarted?.(grant.toolCallId);
+      const { result, changedSource, detectionPartial } = await this.verify(args as unknown as CommandInput, 'agent', run.signal, grant.toolCallId);
       cancelled(run.signal);
       const cmdStr = (args.args as string[])?.join(' ') || args.task;
       this.hooks.activity(`ran command: ${cmdStr}${result.exitCode !== null ? ` · Exit code ${result.exitCode}` : ''}`);
@@ -204,7 +216,7 @@ export class EditorTools {
     }
     throw new Error('Unknown editor tool.');
   }
-  async verify(input: CommandInput, phase: CheckPhase, signal?: AbortSignal): Promise<CheckRecord> {
+  async verify(input: CommandInput, phase: CheckPhase, signal?: AbortSignal, toolCallId?: string): Promise<CheckRecord> {
     if (this.changeGuard.executeCommands === 'disallowed') throw new ForgeError('Change Guard: Executing terminal commands is disallowed by your task permissions.');
     this.hooks.assertWritable([]);
     if (this.active) this.active.performedAction = true;
@@ -218,7 +230,7 @@ export class EditorTools {
       return before.hashes.get(file) !== after.hashes.get(file);
     });
     const record = { input, phase, durationMs: Date.now() - started, result, changedSource, detectionPartial };
-    this.hooks.check?.(record);
+    this.hooks.check?.(record, toolCallId);
     return record;
   }
   private async fingerprints(signal?: AbortSignal) {

@@ -88,6 +88,13 @@ test('explicit file and symbol mentions resolve unique identities and outrank le
   assert.ok(result.chunks[0]?.reason.includes('Explicit'));
   assert.ok(result.chunks.some(chunk => chunk.path === 'docs/notes.md' && chunk.reason.includes('@file')));
   assert.ok(result.chunks.some(chunk => chunk.path === 'src/first.py' && chunk.reason.includes('@symbol')));
+  const selection = parseMentions('@file(src/first.py#L4-L5)', files, symbols);
+  const exact = await context.retrieve('shared', 8000, selection);
+  const excerpt = exact.chunks.find(chunk => chunk.reason.startsWith('Explicit file line range'));
+  assert.deepEqual([excerpt?.startLine, excerpt?.endLine], [4, 5]);
+  assert.match(excerpt?.content ?? '', /^def selected_function\(\):/);
+  const limited = await context.retrieve('shared', 100, selection);
+  assert.match(limited.omitted?.[0]?.reason ?? '', /context budget/);
 });
 
 test('fresh source and ignore policy replace cached retrieval evidence', async t => {

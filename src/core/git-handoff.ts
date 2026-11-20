@@ -42,3 +42,8 @@ export async function prepareDraftBranch(root: string): Promise<string> {
   await git(root, ['switch', '-c', branch]);
   return branch;
 }
+
+export async function currentBranch(root: string): Promise<string | undefined> {
+  try { return await git(root, ['branch', '--show-current']) || 'Detached HEAD'; }
+  catch { return undefined; }
+}

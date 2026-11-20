@@ -1,6 +1,6 @@
 # Requirements and evidence status
 
-This matrix maps the supplied 13-page TrueFoundry Forge-a-thon brief to Little Forge. It is a development checklist, not a claim of contest acceptance. The supplied PDF is the authority for the listed contest requirements; confirm changes with the organizer portal before submission. The complete fixed prompts and Flask pin are in [the evaluation manifest](../evaluation/tasks.json).
+This matrix maps the [TrueFoundry Forge-a-thon brief](https://techfest.org/media/compiProbStatement/TrueFoundry_Forge-a-thon_compressed_UvvRJ9C.pdf) to Little Forge. The fixed prompts and Flask pin are in the [evaluation manifest](../evaluation/tasks.json). The final narrated demo and write-up are in the [submission directory](../submission/README.md).
 
 The new extension is separate from Little_Code's desktop product. Its runtime boundary is the local TrueForge HTTP API; model credentials and provider selection belong in TrueForge. The existing Little_Code provider loop must not be included in the submission. See [the HTTP client](../src/trueforge.ts), [editor MCP server](../src/mcp-server.ts), [tool dispatch](../src/tools.ts), and [proposal engine](../src/core/proposals.ts).
 
@@ -8,7 +8,7 @@ The new extension is separate from Little_Code's desktop product. Its runtime bo
 
 | Gate from the brief | Required implementation or evidence | Current status |
 | --- | --- | --- |
-| VS Code extension is a TrueForge client | Real sessions, turns and streamed events rendered in the editor | Native A and C rehearsals and live Task B observed actual sessions, tools and progress. Final video pending. |
+| VS Code extension is a TrueForge client | Real sessions, turns and streamed events rendered in the editor | The narrated demo shows the Task B TrueForge session and editor tool calls. |
 | Harness owns the agent loop | No direct model calls or retained Little_Code loop | Architecture separates the loop; inspect final bundle and real session before claiming eligibility |
 | Editor capabilities are MCP tools | Read, search, staged proposal/apply and reviewed command execution | Real harness fixture passed, and live Task B applied four approved files through TrueForge. |
 | TrueForge runs locally | Reproducible pinned local startup and tested configuration | Local 0.180.1 startup and fixture configuration passed; independent clean machine pending |

@@ -158,10 +158,16 @@ test('creation, empty files and deletion are undoable after restarting the manag
 
 test('undo refuses to overwrite a later manual edit', async t => {
   const f = await fixture(t);
-  const p = await f.manager.stage([{ path: 'a.ts', beforeHash: hash(await f.read('a.ts')), content: 'approved' }], 'run');
+  const before = await f.read('a.ts');
+  const p = await f.manager.stage([{ path: 'a.ts', beforeHash: hash(before), content: 'approved' }], 'run');
   accept(f.manager, p); f.manager.authorize(p.id, 'run', 'call');
   const result = await f.manager.apply(p.id, 'run', 'call');
   await fs.writeFile(path.join(f.root, 'a.ts'), 'later edit');
+  const restarted = new ProposalManager(new Workspace(f.root), f.storage);
+  assert.deepEqual(await restarted.checkpointDiff(result.checkpointId!, 'a.ts'), { before, after: 'approved' });
+  assert.deepEqual(await restarted.previewUndo(result.checkpointId!), [{ path: 'a.ts', state: 'conflict', before, after: 'approved' }]);
+  assert.equal(await f.read('a.ts'), 'later edit');
+  await assert.rejects(restarted.checkpointDiff(result.checkpointId!, 'another.ts'), /not in the saved checkpoint/);
   assert.deepEqual(await f.manager.undo(result.checkpointId!), { restored: [], conflicts: ['a.ts'] });
   assert.equal(await f.read('a.ts'), 'later edit');
   assert.equal((await f.manager.checkpoints())[0].state, 'restore-conflict');

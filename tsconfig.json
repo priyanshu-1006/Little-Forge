@@ -5,5 +5,5 @@
     "resolveJsonModule": true, "noEmit": true, "types": ["node", "vscode"],
     "lib": ["ES2022", "DOM"]
   },
-  "include": ["src/**/*.ts", "tests/**/*.ts", "scripts/**/*.ts"]
+  "include": ["src/**/*.ts", "tests/**/*.ts", "scripts/**/*.ts", "packages/cli/src/**/*.ts"]
 }

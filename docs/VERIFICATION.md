@@ -1,6 +1,6 @@
 # Verification status
 
-Updated 19 November 2026, IST. Task B passed live verification. The final competition recording and submission are pending.
+The [Round 1 submission directory](../submission/README.md) links to the final narrated demo and write-up. The historical verification receipts below describe separate test runs and rehearsals.
 
 ## What has been verified
 
@@ -42,7 +42,7 @@ The `accept:live` runner uses explicit operator hunk/command decisions. Safe quo
 5. Demonstrate retry/fallback in the full editor with actual configured models; pure policy tests and synthetic provider failures do not prove that recording.
 6. Capture final end-to-end native review/cancellation footage, the short write-up and public submission links.
 
-The index ignores Git/cache watcher noise and retries a transient source change before opening a model session. Relevant source and ignore-policy changes still invalidate the index. After the native C rehearsal, new failures were moved above long context results and scroll into view on arrival. Final recording and public deliverables are tracked in the [release checklist](../submission/RELEASE_CHECKLIST.md).
+The index ignores Git/cache watcher noise and retries a transient source change before opening a model session. Relevant source and ignore-policy changes still invalidate the index. After the native C rehearsal, new failures were moved above long context results and scroll into view on arrival.
 
 ## Current limits
 

@@ -122,7 +122,7 @@ async function waitFor<T>(operation: Promise<T>, signal?: AbortSignal): Promise<
 export function parseMentions(prompt: string, files?: FileEntry[], symbols?: SourceSymbol[]): Mention[] {
   const result: Mention[] = [];
   const seen = new Set<string>();
-  const add = (mention: Mention): void => { const key = `${mention.kind}:${mention.path}:${mention.name ?? ''}:${mention.line ?? ''}`; if (!seen.has(key)) { seen.add(key); result.push(mention); } };
+  const add = (mention: Mention): void => { const key = `${mention.kind}:${mention.path}:${mention.name ?? ''}:${mention.line ?? ''}:${mention.endLine ?? ''}`; if (!seen.has(key)) { seen.add(key); result.push(mention); } };
   const explicit = /@(file|symbol)(?:\(([^)\r\n]+)\)|:("[^"\r\n]+"|[^\s,;]+))/g;
   for (const match of prompt.matchAll(explicit)) {
     const kind = match[1] as 'file' | 'symbol';
@@ -133,6 +133,13 @@ export function parseMentions(prompt: string, files?: FileEntry[], symbols?: Sou
         const selected = files?.filter(file => matchesPath(file.path, filePath));
         if (files && selected?.length !== 1) throw new Error(`File mention could not be resolved: ${filePath}. Choose an existing permitted workspace file.`);
         const resolvedPath = selected?.[0]?.path ?? stablePath(filePath);
+        const range = /^L([1-9]\d*)(?:-L?([1-9]\d*))?$/i.exec(symbolName ?? '');
+        if (range) {
+          const line = Number(range[1]), endLine = Number(range[2] ?? range[1]);
+          if (!Number.isSafeInteger(endLine) || !Number.isSafeInteger(line) || endLine < line) throw new Error('Invalid file line range.');
+          add({ kind, path: resolvedPath, line, endLine, reason: 'Explicit file line range' });
+          continue;
+        }
         add({ kind: 'file', path: resolvedPath });
         if (symbolName) {
           const sym = symbols?.find(s => s.name === symbolName && matchesPath(s.path, resolvedPath));
@@ -342,6 +349,7 @@ export class ContextEngine {
     }
     selected.push(...ranked.filter(candidate => !selected.includes(candidate)));
     const chunks: ContextChunk[] = [];
+    const includedMentions = new Set<Mention>();
     let usedTokens = 0, truncated = index.truncated || ranked.length > CONTEXT_LIMITS.chunks;
     for (const candidate of selected.slice(0, CONTEXT_LIMITS.candidates)) {
       cancelled(signal);
@@ -368,8 +376,10 @@ export class ContextEngine {
           if (score > best) { best = score; anchor = line; }
         }
       }
-      const start = Math.max(0, anchor - 5);
-      let end = Math.min(lines.length, start + CONTEXT_LIMITS.chunkLines);
+      const rangeEnd = candidate.explicit?.endLine;
+      if (rangeEnd && rangeEnd > lines.length) throw new Error(`Requested file range exceeds ${snapshot.path}.`);
+      const start = rangeEnd ? anchor : Math.max(0, anchor - 5);
+      let end = Math.min(rangeEnd ?? lines.length, start + CONTEXT_LIMITS.chunkLines);
       const reason = [...new Set(candidate.reasons)].slice(0, 5).join('; ').slice(0, 600);
       let content = lines.slice(start, end).join('\n').slice(0, CONTEXT_LIMITS.chunkChars);
       let chunk: ContextChunk = { path: snapshot.path, startLine: start + 1, endLine: start + content.split('\n').length, content, reason, tokens: 0, hash: snapshot.hash, ...(declarations.length?{declarations}:{}) };
@@ -385,11 +395,16 @@ export class ContextEngine {
       }
       if (!content.trim() || cost > budgetTokens - usedTokens) { truncated = true; continue; }
       chunk.tokens = cost; chunks.push(chunk); usedTokens += cost;
+      if (candidate.explicit) includedMentions.add(candidate.explicit);
       if (start > 0 || chunk.endLine < lines.length || content.length >= CONTEXT_LIMITS.chunkChars) truncated = true;
     }
     // Mentions never silently disappear because a binary/oversized file was absent from the lexical index.
     for (const mention of mentions) if (!index.indexed.some(file => matchesPath(file.entry.path, mention.path))) throw new Error(`Explicit context is unavailable or exceeds the indexing limit: ${mention.path}.`);
     cancelled(signal);
-    return { chunks, usedTokens, budgetTokens, indexedFiles: index.indexed.length, truncated };
+    const omitted = mentions.filter(mention => !includedMentions.has(mention)).map(mention => ({
+      path: mention.path,
+      reason: excludedPaths.some(excluded => matchesPath(excluded, mention.path)) ? 'Excluded from context' : 'Outside the context budget or excerpt limit',
+    }));
+    return { chunks, usedTokens, budgetTokens, indexedFiles: index.indexed.length, truncated, ...(omitted.length ? { omitted } : {}) };
   }
 }

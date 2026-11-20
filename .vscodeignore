@@ -14,6 +14,7 @@ package-lock.json
 .trueforge/**
 .env
 .env.*
+**/.npmrc
 **/*.sqlite
 **/*.sqlite-*
 **/*.db
@@ -22,8 +23,8 @@ package-lock.json
 output/**
 tmp/**
 submission/**
+website/**
+packages/**
+Raw_Clips/**
 .editorconfig
 CONTRIBUTING.md
-Little_Forge_2_0_Implementation_Pack/**
-Little_Forge_2_0_Master_Blueprint.md
-TrueFoundry_Forge-a-thon.pdf

@@ -1,13 +1,14 @@
 import type { AgentBinding, ForgeEvent } from './core/types.js';
 import { MAX_RETRY_DELAY_MS } from './core/resilience.js';
-import type { ProviderModel, SavedProvider } from './core/providers.js';
+import type { AvailableModel, ProviderModel, SavedProvider } from './core/providers.js';
 
 /** Official TrueForge HTTP wire API, verified against the 0.180.1 source.
  * https://github.com/truefoundry/trueforge/tree/%40truefoundry/trueforge%400.180.1/packages/trueforge/src/routes
  * Wire fields deliberately remain snake_case; this client never calls a model provider.
  */
 type JsonRecord = Record<string, unknown>;
-interface Cursor { turnId?: string; sequence: number; status: string }
+interface Cursor { turnId?: string; sequence: number; status: string; approvalsObserved?: boolean }
+interface StreamWatch { emit: (event: ForgeEvent, sequence?: number) => void; finish: () => void }
 const READ_TOOLS = ['get_workspace_map', 'search_workspace', 'read_file', 'find_symbols', 'retrieve_context', 'get_diagnostics'];
 const EDIT_TOOLS = ['propose_changes', 'apply_proposal'];
 const REQUEST_TIMEOUT_MS = 15_000;
@@ -261,6 +262,7 @@ export class ForgeClient {
   private readonly secrets = new Set<string>();
   private readonly bindings = new Map<string, string>();
   private readonly cursors = new Map<string, Cursor>();
+  private readonly watches = new Map<string, StreamWatch>();
   constructor(baseUrl: string) { this.baseUrl = localUrl(baseUrl, true).origin; }
 
   private safe(message: string): string {
@@ -295,12 +297,21 @@ export class ForgeClient {
     try { return object(JSON.parse(raw)); } catch (error) { if (error instanceof ForgeError) throw error; throw new ForgeError('TrueForge returned invalid JSON.'); }
   }
 
-  async health(): Promise<{ models: Array<{ name: string }>; version?: string }> {
+  async health(): Promise<{ models: AvailableModel[]; version?: string }> {
     const health = await this.json('/healthz');
     if (health.status !== 'ok') throw new ForgeError('TrueForge is not ready.');
     const list = await this.json('/api/v1/models');
     if (!Array.isArray(list.data)) throw new ForgeError('TrueForge returned an invalid model list.');
-    const models = list.data.map(item => { const model = object(item); if (typeof model.name !== 'string') throw new ForgeError('TrueForge returned an invalid model.'); return { name: model.name }; });
+    const models = list.data.map(item => {
+      const model = object(item);
+      if (typeof model.name !== 'string') throw new ForgeError('TrueForge returned an invalid model.');
+      const properties = model.properties && typeof model.properties === 'object' ? model.properties as JsonRecord : {};
+      const contextLength = properties.context_length;
+      const maxOutputTokens = properties.max_output_tokens;
+      return { name: model.name,
+        ...(typeof contextLength === 'number' && Number.isSafeInteger(contextLength) && contextLength > 0 ? { contextLength } : {}),
+        ...(typeof maxOutputTokens === 'number' && Number.isSafeInteger(maxOutputTokens) && maxOutputTokens > 0 ? { maxOutputTokens } : {}) };
+    });
     return { models, ...(typeof health.version === 'string' ? { version: health.version } : {}) };
   }
 
@@ -346,6 +357,16 @@ export class ForgeClient {
     this.bindings.set(binding.name, identity);
   }
 
+  async unregisterEditor(name: string): Promise<void> {
+    if (!this.bindings.has(name)) return;
+    try {
+      await this.json(`/api/v1/settings/mcp-servers/${encodeURIComponent(name)}`, { method: 'DELETE', signal: AbortSignal.timeout(3000) });
+    } catch (error) {
+      if (!(error instanceof ForgeError) || error.status !== 404) throw error;
+    }
+    this.bindings.delete(name);
+  }
+
   async create(model: string, bindingName: string, mode: AgentMode, contextTokens: number, reasoningEffort = '', outputLimit?: number): Promise<string> {
     const result = await this.json('/api/v1/sessions', { method: 'POST', body: JSON.stringify({ agent: { spec: agentSpec(model, bindingName, mode, contextTokens, reasoningEffort, outputLimit) }, metadata: { application: 'little-forge', mode } }) });
     const id = object(result.data).id;
@@ -353,10 +374,10 @@ export class ForgeClient {
     return id;
   }
 
-  async getTurnStatus(sessionId: string, turnId?: string): Promise<JsonRecord> {
+  async getTurnStatus(sessionId: string, turnId?: string, signal?: AbortSignal): Promise<JsonRecord> {
     const id = turnId ?? this.cursors.get(sessionId)?.turnId;
     if (!id) throw new ForgeError('No observed turn ID. Inspect the TrueForge session before retrying an ambiguous request.');
-    const result = await this.json(`/api/v1/sessions/${encodeURIComponent(sessionId)}/turns/${encodeURIComponent(id)}`);
+    const result = await this.json(`/api/v1/sessions/${encodeURIComponent(sessionId)}/turns/${encodeURIComponent(id)}`, { signal });
     return object(result.data);
   }
 
@@ -394,7 +415,13 @@ export class ForgeClient {
         event.state = { ...state, message: terminalError };
       }
       onEvent(event);
+      if (event.type === 'tool.approval_required' && Array.isArray(event.approval_requests) && event.approval_requests.length) cursor.approvalsObserved = true;
     };
+    const finish = () => {
+      if (cursor.status === 'cancelled') throw new ForgeError('Run cancelled in TrueForge. Inspect its session before starting a new request.', undefined, true);
+      if (terminalError) throw new ForgeError(`TrueForge model failed: ${terminalError}`, terminalStatus, false, retry.retryAfterMs, retry.retryAfterTooLong);
+    };
+    this.watches.set(sessionId, { emit, finish });
     try {
       const response = await this.request(`/api/v1/sessions/${encodeURIComponent(sessionId)}/turns`, { method: 'POST', body: JSON.stringify({ input, stream: true, previous_turn_id: 'auto' }), signal }, TURN_TIMEOUT_MS);
       streamRetry = httpRetryHint(response.headers.get('retry-after'));
@@ -406,8 +433,7 @@ export class ForgeClient {
       }
       // A separate operator or TrueForge UI can cancel the session without aborting
       // this caller's signal. Cancellation confirms neither completion nor safe replay.
-      if (cursor.status === 'cancelled') throw new ForgeError('Run cancelled in TrueForge. Inspect its session before starting a new request.', undefined, true);
-      if (terminalError) throw new ForgeError(`TrueForge model failed: ${terminalError}`, terminalStatus, false, retry.retryAfterMs, retry.retryAfterTooLong);
+      finish();
     } catch (error) {
       if (signal?.aborted) {
         // Disconnecting fetch does not cancel server execution. Cancellation is a separate API.
@@ -416,11 +442,41 @@ export class ForgeClient {
       }
       if (error instanceof ForgeError) throw error;
       throw new ForgeError('TrueForge stream was interrupted. Inspect its session before retrying.', undefined, true);
+    } finally {
+      if (!this.canReconnect(sessionId) || signal?.aborted) this.watches.delete(sessionId);
+    }
+  }
+
+  canReconnect(sessionId: string): boolean {
+    const cursor = this.cursors.get(sessionId);
+    return cursor?.status === 'running' && !!cursor.turnId && this.watches.has(sessionId);
+  }
+
+  async resumeStream(sessionId: string, signal?: AbortSignal) {
+    if (!this.canReconnect(sessionId)) throw new ForgeError('No active stream was observed. Inspect its TrueForge session.', undefined, true);
+    const cursor = this.cursors.get(sessionId)!;
+    const watch = this.watches.get(sessionId)!;
+    try {
+      await this.reconnect(sessionId, cursor, watch.emit, signal);
+      watch.finish();
+    } catch (error) {
+      if (this.canReconnect(sessionId) && !signal?.aborted) throw new ForgeError('TrueForge is still unreachable. Retry the connection or inspect the session.', undefined, true);
+      throw error;
+    } finally {
+      if (!this.canReconnect(sessionId) || signal?.aborted) this.watches.delete(sessionId);
     }
   }
 
   private async reconnect(sessionId: string, cursor: Cursor, emit: (event: ForgeEvent, sequence?: number) => void, signal?: AbortSignal): Promise<void> {
-    const turn = await this.getTurnStatus(sessionId, cursor.turnId);
+    let turn;
+    try { turn = await this.getTurnStatus(sessionId, cursor.turnId, signal); }
+    catch (error) {
+      if (error instanceof ForgeError && error.status === 404) {
+        cursor.status = 'unavailable';
+        throw new ForgeError('TrueForge no longer has the observed turn. Inspect the session before retrying.', 404, true);
+      }
+      throw new ForgeError('The observed TrueForge turn could not be reached. Inspect the session or reconnect.', undefined, true);
+    }
     const state = object(turn.state);
     if (state.status === 'running') {
       const response = await this.request(`/api/v1/sessions/${encodeURIComponent(sessionId)}/turns/${encodeURIComponent(cursor.turnId!)}/subscribe?after_sequence_number=${cursor.sequence}`, { signal }, TURN_TIMEOUT_MS);
@@ -428,8 +484,9 @@ export class ForgeClient {
       if (cursor.status === 'running') throw new ForgeError('TrueForge stream ended while the turn was still running. Inspect the session before retrying.', undefined, true);
     } else if (state.status === 'paused') {
       cursor.status = 'paused';
-      // Approval events must already have arrived; never create synthetic executable approvals.
-      throw new ForgeError('TrueForge is paused. Reopen its session to inspect pending approval; do not resubmit the request.', undefined, true);
+      // Only a previously observed approval can remain actionable after reconnect.
+      if (!cursor.approvalsObserved) throw new ForgeError('TrueForge is paused. Reopen its session to inspect pending approval; do not resubmit the request.', undefined, true);
+      emit({ type: 'turn.done', state, recovered: true });
     } else {
       cursor.status = String(state.status);
       // Surface real durable status without replaying full messages or tool operations.
@@ -438,6 +495,7 @@ export class ForgeClient {
   }
 
   async cancel(sessionId: string): Promise<void> {
+    this.watches.delete(sessionId);
     await this.json(`/api/v1/sessions/${encodeURIComponent(sessionId)}/cancel`, { method: 'POST', body: '{}' });
   }
 

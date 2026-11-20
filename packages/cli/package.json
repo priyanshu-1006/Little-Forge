@@ -1,0 +1,33 @@
+{
+  "name": "little-forge-cli",
+  "version": "0.2.1",
+  "description": "A TrueForge-powered terminal coding workspace with repository context, per-hunk review, and undo.",
+  "author": {
+    "name": "Priyanshu Chaurasia",
+    "url": "https://github.com/priyanshu-1006"
+  },
+  "license": "MIT",
+  "type": "commonjs",
+  "homepage": "https://little-forge.vercel.app/",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/priyanshu-1006/Little-Forge.git",
+    "directory": "packages/cli"
+  },
+  "bugs": {
+    "url": "https://github.com/priyanshu-1006/Little-Forge/issues"
+  },
+  "engines": { "node": ">=22.14.0" },
+  "bin": { "little-forge": "dist/little-forge.cjs" },
+  "files": ["dist/little-forge.cjs", "dist/LICENSE", "dist/THIRD_PARTY_NOTICES.txt"],
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/",
+    "access": "public"
+  },
+  "keywords": ["trueforge", "coding-agent", "cli", "code-review", "mcp"],
+  "scripts": {
+    "build": "node build.mjs",
+    "prepack": "node build.mjs",
+    "release:prepare": "node prepare-release.mjs"
+  }
+}

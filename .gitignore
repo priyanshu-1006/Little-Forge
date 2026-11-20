@@ -9,6 +9,7 @@ dist/
 .trueforge/
 .env
 .env.*
+.npmrc
 *.sqlite
 *.sqlite-*
 *.db
@@ -24,6 +25,9 @@ evaluation/workspaces/
 output/
 tmp/
 coverage/
+/Raw_Clips/
+/submission/video/
+/logo little forge.png
 
 # Python caches from the Flask evaluation environment
 __pycache__/

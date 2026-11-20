@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { EditorTools, type ActiveRun } from '../src/tools.js';
 import { Workspace } from '../src/core/workspace.js';
 import { ContextEngine } from '../src/core/context.js';
@@ -101,6 +102,16 @@ test('unknown grants, mutated command arguments and inactive runs fail before ex
   f.tools.stop();
   await assert.rejects(f.tools.call('get_workspace_map', {}), /No active editor run/);
   assert.throws(() => f.tools.authorize('run_command', { task: 'git-diff-check' }, 'call'), /No active editor run/);
+});
+
+test('a reviewed command remains authorized when MCP reorders JSON fields', async t => {
+  const f = await fixture(t);
+  execFileSync('git', ['init', '--quiet', f.root]);
+  f.tools.authorize('run_command', { cwd: '.', args: [], task: 'git-diff-check' }, 'check');
+  const reordered = { task: 'git-diff-check', args: [], cwd: '.' };
+  const result = await f.tools.call('run_command', reordered) as { exitCode: number };
+  assert.equal(result.exitCode, 0);
+  await assert.rejects(f.tools.call('run_command', reordered), /Missing or expired/);
 });
 
 test('cancellation and stopped runs expire pending proposals without changing source', async t => {

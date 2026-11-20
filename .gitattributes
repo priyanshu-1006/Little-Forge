@@ -18,6 +18,8 @@
 *.vsix binary
 *.zip binary
 *.gz binary
+*.tgz binary
+*.mp4 binary
 *.woff binary
 *.woff2 binary
 *.ttf binary

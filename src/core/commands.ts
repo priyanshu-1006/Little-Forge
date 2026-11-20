@@ -65,13 +65,8 @@ export class CommandRunner {
   private child?: ChildProcess;
   private active = false;
   constructor(private readonly workspace: Workspace, private readonly timeoutMs = 120_000) {}
-  async run(input: CommandInput, signal?: AbortSignal): Promise<CommandResult> {
-    cancelled(signal);
-    if (this.active) throw new Error('A project check is already running.');
-    this.active = true;
-    try {
+  async describe(input: CommandInput) {
     const cwd = await this.workspace.resolve(input.cwd || '.');
-    cancelled(signal);
     const spec = commandSpec(input);
     // Prefer the pinned checkout's environment; never take executable paths from model input.
     if (input.task === 'pytest') {
@@ -80,6 +75,15 @@ export class CommandRunner {
         try { const s = await fs.lstat(venv); if (s.isFile() && !s.isSymbolicLink()) { spec.program = venv; break; } } catch { /* Use installed Python. */ }
       }
     }
+    return { ...spec, cwd };
+  }
+  async run(input: CommandInput, signal?: AbortSignal): Promise<CommandResult> {
+    cancelled(signal);
+    if (this.active) throw new Error('A project check is already running.');
+    this.active = true;
+    try {
+    const spec = await this.describe(input);
+    const { cwd } = spec;
     cancelled(signal);
     return await new Promise<CommandResult>((resolve, reject) => {
       let stdout = '', stderr = '', truncated = false, timedOut = false, stopped = false;

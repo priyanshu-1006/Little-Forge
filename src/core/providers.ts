@@ -46,11 +46,13 @@ export const providerPresets: readonly ProviderPreset[] = [
   { id: 'custom', label: 'Custom', note: 'Use Ollama or any OpenAI-compatible endpoint configured in TrueForge.' },
 ];
 
+export interface AvailableModel { name: string; contextLength?: number; maxOutputTokens?: number }
+
 export interface ProviderGroup {
   id: string;
   label: string;
   note: string;
-  models: { name: string; label: string }[];
+  models: (AvailableModel & { label: string })[];
   presets: string[];
   needsToken: boolean;
 }
@@ -73,7 +75,7 @@ function groupId(name: string, saved?: SavedProvider): string {
   return providerPresets.some(preset => preset.id === name) ? name : 'custom';
 }
 
-export function providerGroups(models: readonly { name: string }[], saved: readonly SavedProvider[]): ProviderGroup[] {
+export function providerGroups(models: readonly AvailableModel[], saved: readonly SavedProvider[]): ProviderGroup[] {
   const groups: ProviderGroup[] = providerPresets.map(({ id, label, note, models }) =>
     ({ id, label, note, models: [], presets: models?.map(model => model.name) ?? [], needsToken: false }));
   const byName = new Map(saved.map(provider => [provider.name, provider]));
@@ -82,14 +84,20 @@ export function providerGroups(models: readonly { name: string }[], saved: reado
     const group = groupFor(provider.name);
     if (group.id !== 'custom' && group.id !== 'gemini' && !provider.manifest.hasCredential) group.needsToken = true;
   }
-  for (const { name } of models) {
+  for (const { name, contextLength, maxOutputTokens } of models) {
     const separator = name.indexOf('/');
     if (separator < 1) continue;
     const providerName = name.slice(0, separator);
     const group = groupFor(providerName);
     const provider = byName.get(providerName);
     if (provider && !provider.manifest.hasCredential && group.id !== 'custom' && group.id !== 'gemini') continue;
-    group.models.push({ name, label: group.id === 'custom' ? name : name.slice(separator + 1) });
+    const label = group.id === 'custom' ? name : name.slice(separator + 1);
+    const properties = provider?.manifest.models.find(model => model.name === name.slice(separator + 1))?.properties;
+    const context = contextLength ?? properties?.context_length;
+    const output = maxOutputTokens ?? properties?.max_output_tokens;
+    group.models.push({ name, label,
+      ...(typeof context === 'number' && Number.isSafeInteger(context) && context > 0 ? { contextLength: context } : {}),
+      ...(typeof output === 'number' && Number.isSafeInteger(output) && output > 0 ? { maxOutputTokens: output } : {}) });
   }
   return groups;
 }
